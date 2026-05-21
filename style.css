@@ -9,7 +9,7 @@
 /* jConfirm Plugin Styles - Dark Theme */
 .jconfirm.jconfirm-dark .jconfirm-bg {
     background-color: black;
-    opacity: 0.4; /* Standardized opacity value */
+    opacity: 0.4;
 }
 
 .jconfirm.jconfirm-black .jconfirm-box,
@@ -48,7 +48,7 @@ body {
     color: white;
     font-family: 'Roboto', sans-serif;
     margin: 0;
-    padding: 0; /* Corrected padding value */
+    padding: 0;
     text-align: center;
     display: flex;
     flex-direction: column;
@@ -81,21 +81,11 @@ body {
 
 /* Spinning Animation Keyframes */
 @keyframes girandosimbolo {
-    0% {
-        transform: rotate(0deg);
-    }
-    25% {
-        transform: rotate(90deg);
-    }
-    50% {
-        transform: rotate(180deg);
-    }
-    75% {
-        transform: rotate(270deg);
-    }
-    100% {
-        transform: rotate(360deg);
-    }
+    0%   { transform: rotate(0deg); }
+    25%  { transform: rotate(90deg); }
+    50%  { transform: rotate(180deg); }
+    75%  { transform: rotate(270deg); }
+    100% { transform: rotate(360deg); }
 }
 
 /* pywebview Drag Region Style */
@@ -149,8 +139,8 @@ input[type="number"] {
     padding: 10px;
     color: #f7931a;
     background-color: black;
-    -webkit-appearance: textfield; /* Keep for compatibility */
-    -moz-appearance: textfield;    /* Keep for compatibility */
+    -webkit-appearance: textfield;
+    -moz-appearance: textfield;
 }
 
 /* Hide Spin Buttons on Number Inputs (Webkit) */
@@ -170,9 +160,7 @@ button[type="button"] {
     background-color: black;
     color: #f7931a;
     border: 1px outset white;
-    transition-duration: 0.4s;
-    transition-timing-function: cubic-bezier(0.36, 0.55, 0.19, 1);
-    transition-property: all; /* Corrected property to 'all' */
+    transition: all 0.4s cubic-bezier(0.36, 0.55, 0.19, 1);
     text-align: center;
     white-space: nowrap;
     overflow: hidden;
@@ -187,14 +175,13 @@ button[type="button"] {
     height: 40px;
 }
 
-#botaoApagar,
-#botaoTipo {
+/* Botões gerados dinamicamente na tabela de alertas — agora usam classes */
+.botaoApagar,
+.botaoTipo {
     background-color: black;
     color: #f7931a;
     padding: 0;
-    transition-duration: 0.4s;
-    transition-timing-function: cubic-bezier(0.36, 0.55, 0.19, 1);
-    transition-property: all; /* Corrected property to 'all' */
+    transition: all 0.4s cubic-bezier(0.36, 0.55, 0.19, 1);
     border: 1px outset white;
     height: 40px;
     text-align: center;
@@ -203,24 +190,23 @@ button[type="button"] {
     margin: 3px;
     box-sizing: border-box;
     width: 70px;
+    cursor: pointer;
 }
 
 /* Button Hover State */
 button[type="button"]:hover,
-#botaoApagar:hover,
-#botaoTipo:hover {
+.botaoApagar:hover,
+.botaoTipo:hover {
     background-color: #f7931a;
     color: white;
 }
 
-/* Graph Container (Hidden by default) */
-.grafico {    
+/* Graph Container */
+.grafico {
     position: fixed;
     top: 437px;
     left: 5%;
-	rigth: 5%;
-    /* width: 90%; */
-    /* height: 45%; */
+    right: 5%; /* corrigido: era "rigth" (typo) */
     justify-content: center;
     align-items: center;
     text-align: center;
@@ -229,7 +215,7 @@ button[type="button"]:hover,
 }
 
 #grafico {
-	display: none;
+    display: flex;
     z-index: 2;
 }
 
@@ -251,13 +237,12 @@ button[type="button"]:hover,
 /* Dark Background for Overlays */
 #darkback {
     z-index: 10;
-    background-color: rgba(0, 0, 0, 0.4); /* Standardized opacity value */
-    transition-duration: 0.4s;
-    transition-timing-function: cubic-bezier(0.36, 0.55, 0.19, 1);
+    background-color: rgba(0, 0, 0, 0.4);
+    transition: all 0.4s cubic-bezier(0.36, 0.55, 0.19, 1);
 }
 
 #overlay {
-    background-color: rgba(0, 0, 0, 0.4); /* Standardized opacity value */
+    background-color: rgba(0, 0, 0, 0.4);
     color: white;
     font-size: 15rem;
     z-index: 1000;
@@ -270,7 +255,7 @@ button[type="button"]:hover,
     top: 4px;
     width: 40px;
     height: 40px;
-    display: flex; /* Added to center content */
+    display: flex;
     justify-content: center;
     align-items: center;
     font-size: x-large;
@@ -296,7 +281,7 @@ button[type="button"]:hover,
     position: absolute;
     top: 0px;
     width: 40px;
-    display: flex; /* Added to center content */
+    display: flex;
     justify-content: center;
     align-items: center;
     font-size: 1.5rem;
@@ -305,21 +290,11 @@ button[type="button"]:hover,
 
 /* Animation for info-seta */
 @keyframes surgindo {
-    0% {
-        opacity: 0;
-    }
-	25% {
-		opacity: 0.25;
-	}
-	50% {
-        opacity: 0.5;
-    }
-	75% {
-        opacity: 0.75;
-    }
-    100% {
-        opacity: 1;
-    }
+    0%   { opacity: 0; }
+    25%  { opacity: 0.25; }
+    50%  { opacity: 0.5; }
+    75%  { opacity: 0.75; }
+    100% { opacity: 1; }
 }
 
 #info-seta {
@@ -328,39 +303,13 @@ button[type="button"]:hover,
 }
 
 /* Top Button Positions & Display (Hidden by default) */
-#minimize-btn {
-    right: 40px;
-    display: none;
-}
-
-#reload-btn {
-    left: 40px;
-    display: none;
-}
-
-#centralizar-btn {
-    left: 0px;
-    display: none;
-}
-
-#alerta-btn {
-    left: 160px;
-    display: none;
-}
-
-#fixar-btn {
-    left: 120px;
-    display: none;
-}
-
-#pausar-btn {
-    left: 80px;
-    display: none;
-}
-#grafico-btn {
-	left: 200px;
-	display: none;
-}
+#minimize-btn   { right: 40px;  display: none; }
+#reload-btn     { left: 40px;   display: none; }
+#centralizar-btn { left: 0px;   display: none; }
+#alerta-btn     { left: 160px;  display: none; }
+#fixar-btn      { left: 120px;  display: none; }
+#pausar-btn     { left: 80px;   display: none; }
+#grafico-btn    { left: 200px;  display: none; }
 
 /* Info Logo Style */
 #info-logo {
@@ -375,11 +324,9 @@ button[type="button"]:hover,
 #highPriceDolE,
 #lowPriceDolE,
 #minimumFeeE,
-#economyFeeE,
 #fastestFeeE,
 #halfHourFeeE,
-#hourFeeE,
-#mediumFeeE {
+#hourFeeE {
     text-align: left;
 }
 
@@ -389,13 +336,11 @@ button[type="button"]:hover,
 #highPriceDol,
 #lowPriceDol,
 #minimumFee,
-#economyFee,
 #fastestFee,
 #halfHourFee,
-#hourFee,
-#mediumFee {
+#hourFee {
     color: #ffffff;
-    display: flex; /* Added for alignment control */
+    display: flex;
     justify-content: flex-end;
 }
 
@@ -454,104 +399,44 @@ table {
 
 /* Extra Large Screens */
 @media (min-width: 1921px) {
-    #info-logo {
-        font-size: 3.7vw;
-    }
-    .btc_em_brl_principal {
-        font-size: 3.2vw;
-    }
-    .btc_em_usdt_secundariol {
-        font-size: 1.8vw;
-    }
-    .dolar_btc_e_b3 {
-        font-size: 0.7vw;
-    }
-    .percentual {
-        font-size: 3.7vw;
-    }
-    .horario_atualizacao {
-        font-size: 0.7vw;
-    }
-    .bottom-left-info,
-    table {
-        font-size: 0.7vw;
-    }
+    #info-logo               { font-size: 3.7vw; }
+    .btc_em_brl_principal    { font-size: 3.2vw; }
+    .btc_em_usdt_secundariol { font-size: 1.8vw; }
+    .dolar_btc_e_b3          { font-size: 0.7vw; }
+    .percentual              { font-size: 3.7vw; }
+    .horario_atualizacao     { font-size: 0.7vw; }
+    .bottom-left-info, table { font-size: 0.7vw; }
 }
 
 /* Large Screens */
 @media (max-width: 1920px) {
-    #info-logo {
-        font-size: 4.5vw;
-    }
-    .btc_em_brl_principal {
-        font-size: 4vw;
-    }
-    .btc_em_usdt_secundariol {
-        font-size: 2vw;
-    }
-    .dolar_btc_e_b3 {
-        font-size: 1.4vw;
-    }
-    .percentual {
-        font-size: 4.5vw;
-    }
-    .horario_atualizacao {
-        font-size: 1.4vw;
-    }
-    .bottom-left-info,
-    table {
-        font-size: 1.4vw;
-    }
+    #info-logo               { font-size: 4.5vw; }
+    .btc_em_brl_principal    { font-size: 4vw; }
+    .btc_em_usdt_secundariol { font-size: 2vw; }
+    .dolar_btc_e_b3          { font-size: 1.4vw; }
+    .percentual              { font-size: 4.5vw; }
+    .horario_atualizacao     { font-size: 1.4vw; }
+    .bottom-left-info, table { font-size: 1.4vw; }
 }
 
 /* Tablets */
 @media (max-width: 1024px) {
-    #info-logo {
-        font-size: 8vw;
-    }
-    .btc_em_brl_principal {
-        font-size: 7vw;
-    }
-    .btc_em_usdt_secundariol {
-        font-size: 4vw;
-    }
-    .dolar_btc_e_b3 {
-        font-size: 2.7vw;
-    }
-    .percentual {
-        font-size: 8vw;
-    }
-    .horario_atualizacao {
-        font-size: 2.7vw;
-    }
-    .bottom-left-info,
-    table {
-        font-size: 2.7vw;
-    }
+    #info-logo               { font-size: 8vw; }
+    .btc_em_brl_principal    { font-size: 7vw; }
+    .btc_em_usdt_secundariol { font-size: 4vw; }
+    .dolar_btc_e_b3          { font-size: 2.7vw; }
+    .percentual              { font-size: 8vw; }
+    .horario_atualizacao     { font-size: 2.7vw; }
+    .bottom-left-info, table { font-size: 2.7vw; }
 }
 
 /* Mobile Devices */
 @media (max-width: 640px) {
-    #info-logo {
-        font-size: 16vw;
-    }
-    .btc_em_brl_principal {
-        font-size: 14vw;
-    }
-    .btc_em_usdt_secundariol {
-        font-size: 8vw;
-    }
-    .dolar_btc_e_b3 {
-        font-size: 3.5vw;
-    }
-    .percentual {
-        font-size: 16vw;
-    }
-    .horario_atualizacao {
-        font-size: 3.5vw;
-    }
-    .bottom-left-info,
-    table {
-        font-size: 3.5vw;
-    }
+    #info-logo               { font-size: 16vw; }
+    .btc_em_brl_principal    { font-size: 14vw; }
+    .btc_em_usdt_secundariol { font-size: 8vw; }
+    .dolar_btc_e_b3          { font-size: 3.5vw; }
+    .percentual              { font-size: 16vw; }
+    .horario_atualizacao     { font-size: 3.5vw; }
+    .bottom-left-info, table { font-size: 3.5vw; }
 }

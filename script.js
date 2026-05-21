@@ -1,22 +1,53 @@
+'use strict';
+
+// ---------------------------------------------------------------------------
+// Constantes de tipo de alerta (evita strings mágicas espalhadas no código)
+// ---------------------------------------------------------------------------
+const TIPO_MAIOR = "maior";
+const TIPO_MENOR = "menor";
+const TIPO_DESATIVADO = "desativado";
+
+// ---------------------------------------------------------------------------
+// Constante de ambiente — centraliza a checagem do user-agent
+// ---------------------------------------------------------------------------
+const isPyWebView = navigator.userAgent.includes("pywebview");
+
+// ---------------------------------------------------------------------------
+// Configurações de tempo
+// ---------------------------------------------------------------------------
+const UPDATE_TIME = 3000;        // Intervalo base de atualização de preço (ms)
+const UPDATE_TAXAS = 50000;      // Intervalo base de atualização de taxas (ms)
+const TEMPO_VERIFICAR_INATIVIDADE = 1000; // Intervalo do tick de inatividade (ms)
+const MAX_FALHAS = 10;           // Máximo de falhas consecutivas de API antes de pausar
+
+// ---------------------------------------------------------------------------
+// Estado global
+// ---------------------------------------------------------------------------
 let transicaoAlarme = 0;
 let contadorAlerta = 0;
-let contadorSom = 0;
 let lastPriceBRL;
-let wakeLock;
+let wakeLock = null;
 let loadingTime = 100;
 let tempoInatividade = 0;
 let varSetaMostrar;
+let varSetaOld;
 let ativo = true;
-let falhas = 0;
-let novoIntervalo = 0; // Definir tempo máximo de inatividade em segundos(1000s=~17minutos)
-let tempoLimite = 1000;
-const tempoVerificarInatividade = 1000;
-const maxFalhas = 10; // Definir tempo para atualizar iniciar em milisegundos
-const update_Time = 3000; // Definir tempo para atualizar taxas em milisegundos
-const update_Taxas = 50000;
+let falhasConsecutivas = 0;
+let tempoLimite = 1000; // Tempo máximo de inatividade em segundos (~17 min)
 
+// IDs de intervalo/timeout — declarados no escopo global para acesso em todo o script
+let intervaloID;
+let taxaIntervaloID;
+let alarmesID;
+let transicaoAlarmeID;
 
-// Função para resetar o tempo de inatividade
+// Referência ao listener de teclado do campo de alerta (para remover antes de readicionar)
+let valorAlertaKeydownHandler = null;
+
+// ---------------------------------------------------------------------------
+// Inatividade
+// ---------------------------------------------------------------------------
+
 function resetarInatividade() {
 	tempoInatividade = 0;
 	if (ativo) return;
@@ -25,43 +56,63 @@ function resetarInatividade() {
 	inicial();
 	atualiza_taxas();
 	clearInterval(intervaloID);
-	intervaloID = setInterval(inicial, update_Time);
+	intervaloID = setInterval(inicial, UPDATE_TIME);
 	clearInterval(taxaIntervaloID);
-	taxaIntervaloID = setInterval(atualiza_taxas, update_Taxas);
+	taxaIntervaloID = setInterval(atualiza_taxas, UPDATE_TAXAS);
 }
 
-// Desligar os alarmes por 10s (na variável tempoTransicao)
+function verificarInatividade() {
+	if (!ativo) return;
+	tempoInatividade++;
+	if (tempoLimite > 0 && tempoInatividade >= tempoLimite) {
+		document.getElementById('overlay').style.display = 'flex';
+		ativo = false;
+		clearTimeout(alarmesID);
+		clearInterval(intervaloID);
+		clearInterval(taxaIntervaloID);
+		liberarWakeLock();
+	}
+}
+
+// Registra os listeners de inatividade uma única vez no carregamento
+document.addEventListener('keydown', resetarInatividade);
+document.addEventListener('mousemove', resetarInatividade);
+
+// ---------------------------------------------------------------------------
+// WakeLock — wrapper seguro
+// ---------------------------------------------------------------------------
+
+async function adquirirWakeLock() {
+	try {
+		wakeLock = await navigator.wakeLock.request('screen');
+	} catch (err) {
+		console.warn('WakeLock não disponível:', err);
+		wakeLock = null;
+	}
+}
+
+function liberarWakeLock() {
+	if (wakeLock) {
+		wakeLock.release().catch(err => console.warn('Erro ao liberar wakeLock:', err));
+		wakeLock = null;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Transição de alarme (silencia alarmes temporariamente)
+// ---------------------------------------------------------------------------
+
 function fazerTransicaoAlarme(tempoTransicao = 15000) {
 	transicaoAlarme = 1;
-	if (typeof trasicaoAlarmeID !== 'undefined') {
-		clearTimeout(trasicaoAlarmeID);
-	}
-	trasicaoAlarmeID = setTimeout(() => {
+	clearTimeout(transicaoAlarmeID);
+	transicaoAlarmeID = setTimeout(() => {
 		transicaoAlarme = 0;
 	}, tempoTransicao);
 }
 
-function verificarInatividade() {
-	// Se já está inativo não faça nada
-	if (!ativo) return;
-	// Adiciona tempo de inatividade
-	tempoInatividade++;
-	if (tempoLimite > 0) {
-		if (tempoInatividade >= tempoLimite) {
-			document.getElementById('overlay').style.display = 'flex';
-			ativo = false;
-			clearTimeout(alarmesID);
-			clearInterval(intervaloID);
-			clearInterval(taxaIntervaloID);
-			wakeLock.release();
-		}
-	}
-}
-
-// Monitorando eventos de teclado
-document.addEventListener('keydown', resetarInatividade);
-// Monitorando eventos de movimento do mouse
-document.addEventListener('mousemove', resetarInatividade);
+// ---------------------------------------------------------------------------
+// Integração PyWebView
+// ---------------------------------------------------------------------------
 
 function pyWebviewFechar() {
 	window.pywebview.api.fechar();
@@ -72,23 +123,8 @@ function pyWebviewMinimize() {
 }
 
 function pyWebviewCentralizar() {
-	window.pywebview.api.centralizar('True');
-}
-
-function pyWebviewFixar() {
-	const btn = document.getElementById('fixar-btn');
-	if (btn.textContent === '△') {
-		tempoLimite = 0; // Desativa o tempo para checar inatividade
-		btn.setAttribute('title', 'Desafixar');
-		btn.setAttribute('alt', 'Desafixar');
-		btn.textContent = '▽';
-	} else {
-		tempoLimite = 1000; // Ativa o tempo para checar inatividade
-		btn.setAttribute('title', 'Fixar');
-		btn.setAttribute('alt', 'Fixar');
-		btn.textContent = '△';
-	}
-	window.pywebview.api.fixarTopo();
+	// Passa booleano verdadeiro; o Python recebe como truthy corretamente
+	window.pywebview.api.centralizar(true);
 }
 
 function pyWebviewSalvarAlerta(json) {
@@ -97,17 +133,21 @@ function pyWebviewSalvarAlerta(json) {
 
 async function pyWebviewCarregarAlerta() {
 	try {
-		let alertas = await window.pywebview.api.carregar_alerta();
-		return alertas;
+		return await window.pywebview.api.carregar_alerta();
 	} catch (erro) {
-		console.error("Erro ao carregar alertas:", erro); // Loga o erro
-		return []; // Retorna um array vazio em caso de erro
+		console.error("Erro ao carregar alertas:", erro);
+		return [];
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Controles da janela
+// ---------------------------------------------------------------------------
+
 function reiniciar() {
-	if (document.getElementById('fixar-btn').textContent == '▽') {
-		document.getElementById('fixar-btn').textContent == '△'
+	const fixarBtn = document.getElementById('fixar-btn');
+	if (fixarBtn.textContent === '▽') {
+		fixarBtn.textContent = '△'; // corrigido: era == (comparação) em vez de = (atribuição)
 		window.pywebview.api.fixarTopo();
 	}
 	location.reload();
@@ -120,19 +160,20 @@ function pararIniciar() {
 		clearTimeout(alarmesID);
 		clearInterval(intervaloID);
 		clearInterval(taxaIntervaloID);
-		wakeLock.release();
+		liberarWakeLock();
 		document.removeEventListener('keydown', resetarInatividade);
 		document.removeEventListener('mousemove', resetarInatividade);
 		alternarBtnPausa();
 	} else {
 		ativo = true;
+		falhasConsecutivas = 0;
 		document.getElementById('overlay').style.display = 'none';
 		inicial();
 		clearInterval(intervaloID);
-		intervaloID = setInterval(inicial, update_Time);
+		intervaloID = setInterval(inicial, UPDATE_TIME);
 		atualiza_taxas();
 		clearInterval(taxaIntervaloID);
-		taxaIntervaloID = setInterval(atualiza_taxas, update_Taxas);
+		taxaIntervaloID = setInterval(atualiza_taxas, UPDATE_TAXAS);
 		document.addEventListener('keydown', resetarInatividade);
 		document.addEventListener('mousemove', resetarInatividade);
 		fazerTransicaoAlarme();
@@ -141,131 +182,136 @@ function pararIniciar() {
 }
 
 function alternarBtnPausa() {
-	if (document.getElementById("pausar-btn").getAttribute("title") == "Pausar") {
-		document.getElementById("pausar-btn").setAttribute("title", "Reiniciar");
+	const btn = document.getElementById("pausar-btn");
+	btn.setAttribute("title", btn.getAttribute("title") === "Pausar" ? "Reiniciar" : "Pausar");
+}
+
+function pyWebviewFixar() {
+	const btn = document.getElementById('fixar-btn');
+	if (btn.textContent === '△') {
+		tempoLimite = 0;
+		btn.setAttribute('title', 'Desafixar');
+		btn.setAttribute('alt', 'Desafixar');
+		btn.textContent = '▽';
 	} else {
-		document.getElementById("pausar-btn").setAttribute("title", "Pausar");
+		tempoLimite = 1000;
+		btn.setAttribute('title', 'Fixar');
+		btn.setAttribute('alt', 'Fixar');
+		btn.textContent = '△';
 	}
+	window.pywebview.api.fixarTopo();
 }
 
 function botoesPywebview() {
-	if (navigator.userAgent == "pywebview") {
-		document.getElementById("reload-btn").style.display = "flex";
-		document.getElementById("centralizar-btn").style.display = "flex";
-		document.getElementById("fixar-btn").style.display = "flex";
-		document.getElementById("alerta-btn").style.display = "flex";
-		document.getElementById("minimize-btn").style.display = "flex";
-		document.getElementById("close-btn").style.display = "flex";
-		document.getElementById("pausar-btn").style.display = "flex";
-		document.getElementById("grafico-btn").style.display = "flex";		
+	if (isPyWebView) {
+		["reload-btn", "centralizar-btn", "fixar-btn", "alerta-btn",
+		 "minimize-btn", "close-btn", "pausar-btn", "grafico-btn"].forEach(id => {
+			document.getElementById(id).style.display = "flex";
+		});
 	} else {
-		document.getElementById("pausar-btn").style.left = "unset";
-		document.getElementById("pausar-btn").style.right = "0px";
-		document.getElementById("pausar-btn").style.display = "flex";
-		document.getElementById("alerta-btn").style.left = "0px";
-		document.getElementById("alerta-btn").style.display = "flex";
+		const pausarBtn = document.getElementById("pausar-btn");
+		pausarBtn.style.left = "unset";
+		pausarBtn.style.right = "0px";
+		pausarBtn.style.display = "flex";
+		const alertaBtn = document.getElementById("alerta-btn");
+		alertaBtn.style.left = "0px";
+		alertaBtn.style.display = "flex";
 	}
 }
 
 function graficoAlternar() {
-	if (document.getElementById("grafico").style.display == "flex") {
-		document.getElementById("grafico").style.display = "none";
-	} else if (document.getElementById("grafico").style.display == "none") {
-		document.getElementById("grafico").style.display = "flex";
-	} else {
-		document.getElementById("grafico").style.display = "none";
-	}
+	const grafico = document.getElementById("grafico");
+	// Usa getComputedStyle para ler o valor real do CSS na primeira chamada,
+	// quando style.display ainda é string vazia (nenhum valor inline definido).
+	const displayAtual = grafico.style.display || getComputedStyle(grafico).display;
+	grafico.style.display = displayAtual === "flex" ? "none" : "flex";
 }
 
+// ---------------------------------------------------------------------------
+// Atualização de preços
+// ---------------------------------------------------------------------------
+
 async function inicial() {
-	if (ativo) {
-		wakeLock = await navigator.wakeLock.request('screen');
-		const percentElement = document.getElementById('info-percent');
-		try {
-			const responseBRL = await fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCBRL');
-			const dataBRL = await responseBRL.json();
-			lastPriceBRL = parseFloat(dataBRL.lastPrice);
-			const formattedPriceBRL = lastPriceBRL.toLocaleString('pt-BR', {
-				style: 'currency',
-				currency: 'BRL'
-			});
-			const priceChangePercent = parseFloat(dataBRL.priceChangePercent);
-			// Calcular se houve aumento ou diminuição do preço e mostrar a seta correspondente
-			if (typeof varSetaOld !== 'undefined') {
-				let varSetaNew = priceChangePercent;
-				if (varSetaOld > varSetaNew) {
-					varSetaMostrar = "\u00A0\u00A0↓";
-				} else if (varSetaOld < varSetaNew) {
-					varSetaMostrar = "\u00A0\u00A0↑";
-				} else {
-					varSetaMostrar = "↔";
-				}
-				varSetaOld = priceChangePercent;
+	if (!ativo) return;
+
+	await adquirirWakeLock();
+
+	try {
+		const responseBRL = await fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCBRL');
+		const dataBRL = await responseBRL.json();
+
+		lastPriceBRL = parseFloat(dataBRL.lastPrice);
+		falhasConsecutivas = 0; // Requisição bem-sucedida — reseta contador de falhas
+
+		const formattedPriceBRL = lastPriceBRL.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+		const priceChangePercent = parseFloat(dataBRL.priceChangePercent);
+
+		// Calcular direção da variação e mostrar seta correspondente
+		if (varSetaOld !== undefined) {
+			if (varSetaOld > priceChangePercent) {
+				varSetaMostrar = "\u00A0\u00A0↓";
+			} else if (varSetaOld < priceChangePercent) {
+				varSetaMostrar = "\u00A0\u00A0↑";
 			} else {
-				varSetaOld = priceChangePercent;
 				varSetaMostrar = "↔";
 			}
-			const formattedPercent = priceChangePercent.toFixed(2) + '%';
-
-			// Formatar a variavel de hora e data
-			const now = new Date();
-			const horaFormatado = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
-			const dataFormatada = `${now.getDate().toString().padStart(2, '0')}/${(now.getMonth() + 1).toString().padStart(2, '0')}/${now.getFullYear().toString().slice(2)}`;
-			const formattedTime = dataFormatada + " - " + horaFormatado;
-
-			// Alterar o Título da página com o novo valor
-			let titleText = `${formattedPriceBRL} | ${formattedPercent}`;
-			document.title = titleText;
-
-			// Atualizar informações de máxima e mínima de preços
-			document.getElementById('highPrice').textContent = parseFloat(dataBRL.highPrice).toLocaleString('pt-BR', {
-				style: 'currency',
-				currency: 'BRL'
-			});
-
-			document.getElementById('lowPrice').textContent = parseFloat(dataBRL.lowPrice).toLocaleString('pt-BR', {
-				style: 'currency',
-				currency: 'BRL'
-			});
-
-			// Atualizar preço em BRL, percentual de aumento e hora da última atualização
-			document.getElementById('info-price').textContent = formattedPriceBRL;
-			if (ativo) {
-				document.getElementById('info-percent').textContent = formattedPercent;
-				if (varSetaMostrar.replaceAll('\u00A0', '') === '↑') {
-					document.getElementById('info-seta').style.color = "#f7931a";
-				} else if (varSetaMostrar.replaceAll('\u00A0', '') === '↓') {
-					document.getElementById('info-seta').style.color = "#f7931a";
-				} else if (varSetaMostrar == '↔') {
-					document.getElementById('info-seta').style.color = "white";
-				}
-				// Atualiza a seta indicando a última variação depois apaga e reativa a animação
-				document.getElementById('info-seta').style.opacity = '0';
-				document.getElementById('info-seta').style.animation = 'none';
-				document.getElementById('info-seta').offsetHeight;
-				document.getElementById('info-seta').style.animation = 'surgindo 1s forwards';
-				document.getElementById('info-seta').textContent = varSetaMostrar;
-			}
-			document.getElementById('info-time').textContent = formattedTime;
-			// Atualizar preço em USD (indice BTC) e USD B3
-			atualiza_USD(lastPriceBRL);
-		} catch (error) {
-			console.error('Erro ao buscar dados da API BTC/BRL Binance:', error);
-			document.title = 'Sem Dados';
-			document.getElementById('info-price').textContent = '▶Sem Dados◀';
+		} else {
+			varSetaMostrar = "↔";
 		}
-		// Intervalo de Inicial
-		intervaloVariavelInicial = Math.floor(Math.random() * 3001 + update_Time);
-		if (typeof intervaloID !== 'undefined') {
-			clearInterval(intervaloID);
+		varSetaOld = priceChangePercent;
+
+		const formattedPercent = priceChangePercent.toFixed(2) + '%';
+
+		// Formatar data e hora com Intl.DateTimeFormat
+		const now = new Date();
+		const formattedTime =
+			new Intl.DateTimeFormat('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit' }).format(now) +
+			" - " +
+			new Intl.DateTimeFormat('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(now);
+
+		document.title = `${formattedPriceBRL} | ${formattedPercent}`;
+
+		document.getElementById('highPrice').textContent = parseFloat(dataBRL.highPrice).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+		document.getElementById('lowPrice').textContent = parseFloat(dataBRL.lowPrice).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+		document.getElementById('info-price').textContent = formattedPriceBRL;
+		document.getElementById('info-time').textContent = formattedTime;
+
+		if (ativo) {
+			document.getElementById('info-percent').textContent = formattedPercent;
+			const setaLimpa = varSetaMostrar.replaceAll('\u00A0', '');
+			document.getElementById('info-seta').style.color = setaLimpa === '↔' ? 'white' : '#f7931a';
+			// Reinicia a animação da seta
+			const setaEl = document.getElementById('info-seta');
+			setaEl.style.opacity = '0';
+			setaEl.style.animation = 'none';
+			setaEl.offsetHeight; // força reflow para reiniciar animação CSS
+			setaEl.style.animation = 'surgindo 1s forwards';
+			setaEl.textContent = varSetaMostrar;
 		}
-		intervaloID = setInterval(inicial, intervaloVariavelInicial);
-		// checar alarmes depois de 1 segundo(1000 milisegundos)
-		if (typeof alarmesID !== 'undefined') {
-			clearTimeout(alarmesID);
+
+		atualiza_USD(lastPriceBRL);
+
+	} catch (error) {
+		console.error('Erro ao buscar dados da API BTC/BRL Binance:', error);
+		document.title = 'Sem Dados';
+		document.getElementById('info-price').textContent = '▶Sem Dados◀';
+
+		// Lógica de falhas consecutivas: pausa o monitoramento após MAX_FALHAS tentativas
+		falhasConsecutivas++;
+		if (falhasConsecutivas >= MAX_FALHAS) {
+			console.warn(`${MAX_FALHAS} falhas consecutivas — pausando monitoramento.`);
+			pararIniciar();
+			return;
 		}
-		alarmesID = setTimeout(checarAlarmes, 1000);
 	}
+
+	// Reagendar com intervalo aleatório para evitar picos sincronizados de requisição
+	const proximoIntervalo = Math.floor(Math.random() * 3001 + UPDATE_TIME);
+	clearInterval(intervaloID);
+	intervaloID = setInterval(inicial, proximoIntervalo);
+
+	clearTimeout(alarmesID);
+	alarmesID = setTimeout(checarAlarmes, 1000);
 }
 
 async function atualiza_B3(dollarExchangeRate) {
@@ -274,11 +320,8 @@ async function atualiza_B3(dollarExchangeRate) {
 		const dataBRLx = await responseBRLx.json();
 		const lastPriceBRLaskx = parseFloat(dataBRLx.USDBRL.ask);
 		const lastPriceBRLbidx = parseFloat(dataBRLx.USDBRL.bid);
-		const lastPriceBRLx = (lastPriceBRLaskx + lastPriceBRLbidx) / 2
-		const formattedPriceBRLx = lastPriceBRLx.toLocaleString('pt-BR', {
-			style: 'currency',
-			currency: 'BRL'
-		});
+		const lastPriceBRLx = (lastPriceBRLaskx + lastPriceBRLbidx) / 2;
+		const formattedPriceBRLx = lastPriceBRLx.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 		document.getElementById('info-dolar').textContent = `${dollarExchangeRate} | ${formattedPriceBRLx}`;
 	} catch (error) {
 		console.error('Erro ao buscar dados do BRL/USDT AwesomeAPI:', error);
@@ -286,318 +329,148 @@ async function atualiza_B3(dollarExchangeRate) {
 	}
 }
 
-async function atualiza_USD(lastPriceBRL) {
+async function atualiza_USD(priceBRL) {
 	try {
 		const responseUSD = await fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT');
 		const dataUSD = await responseUSD.json();
 		const lastPriceUSD = parseFloat(dataUSD.lastPrice);
-		const formattedPriceUSD = lastPriceUSD.toLocaleString('pt-BR', {
-			style: 'currency',
-			currency: 'USD'
-		});
-		// Atualizar preço em USDT
+		const formattedPriceUSD = lastPriceUSD.toLocaleString('pt-BR', { style: 'currency', currency: 'USD' });
+
 		document.getElementById('info-usdt').textContent = formattedPriceUSD;
-		// Calcula o valor do dólar dividindo o valor do BTC em reais pelo valor em dólares
-		const dollarExchangeRate = (lastPriceBRL / lastPriceUSD).toLocaleString('pt-BR', {
-			style: 'currency',
-			currency: 'BRL'
-		});
-		// Atualizar informações de máxima e mínima de preços
-		document.getElementById('highPriceDol').textContent = parseFloat(dataUSD.highPrice).toLocaleString('pt-BR', {
-			style: 'currency',
-			currency: 'USD'
-		});
-		document.getElementById('lowPriceDol').textContent = parseFloat(dataUSD.lowPrice).toLocaleString('pt-BR', {
-			style: 'currency',
-			currency: 'USD'
-		});
-		// Atualizar preço em Dólar
-		atualiza_B3(dollarExchangeRate)
+
+		const dollarExchangeRate = (priceBRL / lastPriceUSD).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+
+		document.getElementById('highPriceDol').textContent = parseFloat(dataUSD.highPrice).toLocaleString('pt-BR', { style: 'currency', currency: 'USD' });
+		document.getElementById('lowPriceDol').textContent = parseFloat(dataUSD.lowPrice).toLocaleString('pt-BR', { style: 'currency', currency: 'USD' });
+
+		atualiza_B3(dollarExchangeRate);
 	} catch (error) {
-		console.error('Erro ao buscar dados do BTC/BRL:', error);
+		console.error('Erro ao buscar dados do BTC/USDT Binance:', error);
 		document.getElementById('info-usdt').textContent = 'Sem Dados';
 		document.getElementById('info-dolar').textContent = 'Sem Dados';
 	}
 }
 
 async function atualiza_taxas() {
-	if (ativo) {
-		try {
-			const responseFees = await fetch('https://mempool.space/api/v1/fees/precise');
-			const dataFees = await responseFees.json();
-			document.getElementById('fastestFee').textContent = `${parseFloat(dataFees.fastestFee).toFixed(2).replace('.', ',')} sat/vB`;
-			document.getElementById('halfHourFee').textContent = `${parseFloat(dataFees.halfHourFee).toFixed(2).replace('.', ',')} sat/vB`;
-			document.getElementById('hourFee').textContent = `${parseFloat(dataFees.hourFee).toFixed(2).replace('.', ',')} sat/vB`;
-			document.getElementById('minimumFee').textContent = `${parseFloat(dataFees.minimumFee).toFixed(2).replace('.', ',')} sat/vB`;
-		} catch (error) {
-			console.error('Erro ao buscar dados de taxas:', error);
-		}
-		intervaloVariavelTaxas = Math.floor(Math.random() * 20001 + update_Taxas);
-		if (typeof taxaIntervaloID !== 'undefined') {
-			clearInterval(taxaIntervaloID);
-		}
-		taxaIntervaloID = setInterval(atualiza_taxas, intervaloVariavelTaxas);
-	}
-}
-
-function checarAlarmes() {
+	if (!ativo) return;
 	try {
-		alertas = JSON.parse(localStorage.getItem('alertasjson')) || [];
-	} catch (e) {
-		console.error("Erro ao parsear o JSON:", e);
+		const responseFees = await fetch('https://mempool.space/api/v1/fees/precise');
+		const dataFees = await responseFees.json();
+		const fmt = v => `${parseFloat(v).toFixed(2).replace('.', ',')} sat/vB`;
+		document.getElementById('fastestFee').textContent = fmt(dataFees.fastestFee);
+		document.getElementById('halfHourFee').textContent = fmt(dataFees.halfHourFee);
+		document.getElementById('hourFee').textContent = fmt(dataFees.hourFee);
+		document.getElementById('minimumFee').textContent = fmt(dataFees.minimumFee);
+	} catch (error) {
+		console.error('Erro ao buscar dados de taxas:', error);
 	}
-	if (transicaoAlarme === 0) {
-		if (alertas.length > 0) {
-			alertas.forEach((alerta, index) => {
-				if (alerta.tipo == "maior") {
-					if (lastPriceBRL >= alerta.valor) {
-						if (contadorAlerta == 0) {
-							$.alert({
-								title: 'ALERTA',
-								content: 'O Preço do Bitcoin superou<br>' + (parseFloat(alerta.valor) || 0).toLocaleString('pt-BR', {
-									style: 'currency',
-									currency: 'BRL'
-								}),
-								theme: 'dark',
-								onClose: function() {
-									contadorSom = 0;
-									contadorAlerta = 0;
-									mudarTipo(index, desativar = 1);
-								},
-								draggable: false,
-								boxWidth: '300px',
-								useBootstrap: false,
-							});
-						}
-						contadorAlerta = 1;
-						tocarAlerta();
-					}
-				} else if (alerta.tipo == "menor") {
-					if (lastPriceBRL <= alerta.valor) {
-						if (contadorAlerta == 0) {
-							$.alert({
-								title: 'ALERTA',
-								content: 'O Preço do Bitcoin caiu abaixo de<br>' + (parseFloat(alerta.valor) || 0).toLocaleString('pt-BR', {
-									style: 'currency',
-									currency: 'BRL'
-								}),
-								theme: 'dark',
-								onClose: function() {
-									contadorSom = 0;
-									contadorAlerta = 0;
-									mudarTipo(index, desativar = 1);
-								},
-								draggable: false,
-								boxWidth: '300px',
-								useBootstrap: false,
-							});
-						}
-						contadorAlerta = 1;
-						tocarAlerta();
-					}
-				} else if (alerta.tipo == "desativado") {
-					fazerTransicaoAlarme();
-				} else {
-					console.log("Falha de tipo de alarme.");
-				}
-			});
-		}
-	}
+
+	// Reagendar com intervalo aleatório
+	const proximoIntervalo = Math.floor(Math.random() * 20001 + UPDATE_TAXAS);
+	clearInterval(taxaIntervaloID);
+	taxaIntervaloID = setInterval(atualiza_taxas, proximoIntervalo);
 }
 
-function apagarAlertas(index) {
-	let alertas = JSON.parse(localStorage.getItem('alertasjson')) || [];
-	alertas.splice(index, 1);
-	localStorage.setItem('alertasjson', JSON.stringify(alertas));
-	if (navigator.userAgent == "pywebview") {
-		pyWebviewSalvarAlerta(alertas);
-	}
-	carregarAlertas();
-}
+// ---------------------------------------------------------------------------
+// Carregamento inicial
+// ---------------------------------------------------------------------------
 
-function carregarAlertas() {
-	const tabela = document.getElementById("alertasTabela").getElementsByTagName('tbody')[0];
-	tabela.innerHTML = '';
-	let alertas = [];
-	// Ordenar os alarmes em ordem decrescente se existirem
-	try {
-		alertas = JSON.parse(localStorage.getItem('alertasjson')) || [];
-		alertasOrdenados = [...alertas].sort((a, b) => b.valor - a.valor)
-		if (JSON.stringify(alertas) !== JSON.stringify(alertasOrdenados)) {
-			localStorage.setItem('alertasjson', JSON.stringify(alertasOrdenados));
-			alertas = alertasOrdenados;
+function verificarCarregamento() {
+	if (document.getElementById('info-price').textContent === '') {
+		loadingTime *= 1.2;
+		if (loadingTime > 2000) {
+			location.reload();
 		}
-	} catch (e) {
-		console.error("Erro ao parsear o JSON:", e);
-	}
-	if (alertas.length > 0) {
-		alertas.forEach((valorAlerta, index) => {
-			valorAlertaFormatado = parseFloat(valorAlerta.valor).toLocaleString('pt-BR', {
-				style: 'currency',
-				currency: 'BRL',
-				minimumFractionDigits: 2
-			});
-
-			const novaLinha = tabela.insertRow();
-
-			const celulatipo = novaLinha.insertCell(0);
-			const botaotipo = document.createElement("button");
-			const tipo = valorAlerta.tipo;
-			botaotipo.id = "botaoTipo";
-			botaotipo.type = "button";
-			botaotipo.onclick = function() {
-				mudarTipo(index);
-				fazerTransicaoAlarme();
-			};
-			if (tipo == "maior") {
-				botaotipo.textContent = "Maior △";
-				botaotipo.title = "Alertar quando valor do BTC for maior que "+valorAlertaFormatado;
-				botaotipo.style.opacity = 1;
-			} else if (tipo == "menor") {
-				botaotipo.textContent = "Menor ▽";
-				botaotipo.title = "Alertar quando valor do BTC for menor que "+valorAlertaFormatado;
-				botaotipo.style.opacity = 1;
-			} else if (tipo == "desativado") {
-				botaotipo.textContent = "Desativado";
-				botaotipo.title = "Alarme Desativado";
-				botaotipo.style.opacity = .5;
-			}
-			celulatipo.appendChild(botaotipo);
-
-			const celulaValor = novaLinha.insertCell(1);
-			celulaValor.textContent = valorAlertaFormatado;
-			celulaValor.title = valorAlertaFormatado;
-			const celulaAcao = novaLinha.insertCell(2);
-			const botaoApagar = document.createElement("button");
-			botaoApagar.id = "botaoApagar";
-			botaoApagar.textContent = "Apagar";
-			botaoApagar.title = "Apagar alarme "+valorAlertaFormatado;
-			botaoApagar.onclick = function() {
-				apagarAlertas(index);
-			};
-			celulaAcao.appendChild(botaoApagar);
-		});
-	}
-
-	// Limpa o campo de valor
-	document.getElementById('valorAlerta').value = "";
-	// Foca no campo para digitar o valor
-	document.getElementById('valorAlerta').focus();
-	// Adiciona um monitor para impedir a tecla enter de submeter os formularios
-	document.getElementById('valorAlerta').addEventListener('keydown', function(event) {
-		if (event.key === 'Enter') {
-			event.preventDefault();
-			if (document.getElementById("modalAlerta").style.display === "block") {
-				if (this.value.trim() !== '') {
-					criarAlerta();
-				}
-			}
-		}
-		if (event.key === 'Escape') {
-			if (document.getElementById("modalAlerta").style.display === "block") {
-				voltarAlerta();
-			}
-		}
-	});
-}
-
-// Mudar tipo
-function mudarTipo(index, desativar = 0) {
-	let alertas = [];
-	try {
-		alertas = JSON.parse(localStorage.getItem('alertasjson')) || [];
-	} catch (e) {
-		console.error("Erro ao parsear o JSON:", e);
-	}
-
-	// Verificar se o índice é válido
-	if (index < 0 || index >= alertas.length) {
-		console.error("Índice inválido");
-		return;
-	}
-
-	// Salvar valores atuais em variáveis para comparar
-	let valor = alertas[index].valor;
-	let tipoOriginal = alertas[index].tipo; // Tipo original antes de mudar
-
-	// Inverter o tipo de alarme
-	let tipoAlterado;
-	if (desativar == 0) {
-		if (tipoOriginal === "maior") {
-			tipoAlterado = "menor";
-		} else if (tipoOriginal === "menor") {
-			tipoAlterado = "desativado";
-		} else if (tipoOriginal === "desativado") {
-			tipoAlterado = "maior";
-		} else {
-			console.log("Falha no tipo.");
-		}
+		setTimeout(verificarCarregamento, loadingTime);
 	} else {
-		tipoAlterado = "desativado";
-	}
-
-	// Atualizar o tipo do alarme
-	alertas[index].tipo = tipoAlterado;
-
-	// Checar se já existe um alerta com o mesmo número e novo tipo, excluindo o próprio alarme alterado
-	let alertaExistente = alertas.some((alerta, i) => {
-		return alerta.valor === valor && alerta.tipo === tipoAlterado && i !== index;
-	});
-
-	if (alertaExistente) {
-		$.alert({
-			title: 'FALHA',
-			content: 'Existe um alerta com esse mesmo valor.',
-			theme: 'dark',
-			draggable: false,
-			boxWidth: '300px',
-			useBootstrap: false,
-			autoClose: 'ok|5000',
-		});
-	} else {
-		try {
-			localStorage.setItem('alertasjson', JSON.stringify(alertas));
-
-			// Se estiver no ambiente PyWebView, chamar a função de integração
-			if (navigator.userAgent.includes("pywebview")) {
-				pyWebviewSalvarAlerta(alertas);
-			}
-		} catch (e) {
-			console.error("Erro ao salvar no localStorage:", e);
+		document.getElementById('tela-carregamento').style.display = 'none';
+		document.getElementById('conteudo').style.display = 'block';
+		loadingTime = 100;
+		if (isPyWebView) {
+			sincronizaAlertas();
 		}
+		// Silencia alarmes por 5s após o carregamento para evitar disparos imediatos
+		fazerTransicaoAlarme(5000);
 	}
-	carregarAlertas();
 }
 
-// Mostra ou esconder a tela de alertas
-function mostrarTelaAlerta() {
-	const modal = document.getElementById("modalAlerta");
-	const darkback = document.getElementById('darkback');
-	if (modal.style.display === "block") {
-		modal.style.display = "none";
-		darkback.style.display = 'none';
-	} else {
-		modal.style.display = "block";
-		darkback.style.display = 'flex';
-	}
-	carregarAlertas()
-}
+// ---------------------------------------------------------------------------
+// Sincronização de alertas com backend Python
+// ---------------------------------------------------------------------------
 
 async function sincronizaAlertas() {
-	let alertasPython = await pyWebviewCarregarAlerta();
-	let alertas = JSON.parse(localStorage.getItem('alertasjson')) || [];
-	let alertasSalvos = alertasPython || [];
-	if (JSON.stringify(alertasSalvos) !== JSON.stringify(alertas)) {
+	const alertasPython = await pyWebviewCarregarAlerta();
+	const alertasLocais = JSON.parse(localStorage.getItem('alertasjson')) || [];
+	const alertasSalvos = alertasPython || [];
+	if (JSON.stringify(alertasSalvos) !== JSON.stringify(alertasLocais)) {
 		localStorage.setItem('alertasjson', JSON.stringify(alertasSalvos));
 	}
 }
 
-// Criar alertas
-function criarAlerta() {
-	valor = document.getElementById("valorAlerta").value;
+// ---------------------------------------------------------------------------
+// Alertas — lógica de verificação
+// ---------------------------------------------------------------------------
 
+function checarAlarmes() {
+	let alertas = [];
+	try {
+		alertas = JSON.parse(localStorage.getItem('alertasjson')) || [];
+	} catch (e) {
+		console.error("Erro ao parsear alertas do localStorage:", e);
+		return;
+	}
+
+	if (transicaoAlarme !== 0 || alertas.length === 0) return;
+
+	alertas.forEach((alerta, index) => {
+		if (alerta.tipo === TIPO_MAIOR && lastPriceBRL >= alerta.valor) {
+			dispararAlerta('O Preço do Bitcoin superou', alerta.valor, index);
+		} else if (alerta.tipo === TIPO_MENOR && lastPriceBRL <= alerta.valor) {
+			dispararAlerta('O Preço do Bitcoin caiu abaixo de', alerta.valor, index);
+		} else if (alerta.tipo === TIPO_DESATIVADO) {
+			fazerTransicaoAlarme();
+		} else if (alerta.tipo !== TIPO_MAIOR && alerta.tipo !== TIPO_MENOR && alerta.tipo !== TIPO_DESATIVADO) {
+			console.warn("Tipo de alarme desconhecido:", alerta.tipo);
+		}
+	});
+}
+
+function dispararAlerta(mensagem, valor, index) {
+	if (contadorAlerta !== 0) return;
+	contadorAlerta = 1;
+	const valorFormatado = (parseFloat(valor) || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+	$.alert({
+		title: 'ALERTA',
+		content: `${mensagem}<br>${valorFormatado}`,
+		theme: 'dark',
+		onClose: function() {
+			contadorAlerta = 0;
+			mudarTipo(index, true); // passa booleano em vez de expressão de atribuição
+		},
+		draggable: false,
+		boxWidth: '300px',
+		useBootstrap: false,
+	});
+	tocarAlerta();
+}
+
+// ---------------------------------------------------------------------------
+// Alertas — CRUD e interface
+// ---------------------------------------------------------------------------
+
+function mostrarTelaAlerta() {
+	const modal = document.getElementById("modalAlerta");
+	const darkback = document.getElementById('darkback');
+	const estaAberto = modal.style.display === "block";
+	modal.style.display = estaAberto ? "none" : "block";
+	darkback.style.display = estaAberto ? "none" : "flex";
+	carregarAlertas();
+}
+
+function criarAlerta() {
+	const valor = document.getElementById("valorAlerta").value; // corrigido: era variável global implícita
 	if (validarValor(valor)) {
-		salvarAlerta(valor, "maior", 0);
+		salvarAlerta(valor, TIPO_MAIOR, 0);
 	} else {
 		$.alert({
 			title: 'FALHA',
@@ -612,27 +485,14 @@ function criarAlerta() {
 	carregarAlertas();
 }
 
-// Testes de validação se é um número
 function validarValor(numero) {
 	const paraValidar = parseFloat(numero);
-	return !isNaN(paraValidar) && numero.trim() !== "";
+	return !isNaN(paraValidar) && String(numero).trim() !== "";
 }
 
-// Salvar valor dos alertas
 function salvarAlerta(valor, tipo, vazio) {
-	// Recuperar os alertas armazenados no localStorage
 	let alertas = JSON.parse(localStorage.getItem('alertasjson')) || [];
-
-	// Criar o novo alerta como um objeto
-	let novoAlerta = {
-		valor,
-		tipo,
-		vazio
-	};
-
-	// Checar se já existe um alerta com o mesmo número e tipo
-	let alertaExistente = alertas.find(alerta => alerta.valor === valor && alerta.tipo === tipo);
-
+	const alertaExistente = alertas.find(a => a.valor === valor && a.tipo === tipo);
 	if (alertaExistente) {
 		$.alert({
 			title: 'FALHA',
@@ -643,50 +503,215 @@ function salvarAlerta(valor, tipo, vazio) {
 			useBootstrap: false,
 			autoClose: 'ok|15000',
 		});
-	} else {
-		alertas.push(novoAlerta); // Adicionar o novo alerta
-		localStorage.setItem('alertasjson', JSON.stringify(alertas));
-		// Se estiver no ambiente PyWebView, chamar a função de integração
-		if (navigator.userAgent == "pywebview") {
-			pyWebviewSalvarAlerta(alertas);
-		}
-		fazerTransicaoAlarme()
+		return;
 	}
+	alertas.push({ valor, tipo, vazio });
+	localStorage.setItem('alertasjson', JSON.stringify(alertas));
+	if (isPyWebView) {
+		pyWebviewSalvarAlerta(alertas);
+	}
+	fazerTransicaoAlarme();
 }
 
-// Voltar sem criar alerta
 function voltarAlerta() {
 	limparValor();
 	mostrarTelaAlerta();
 }
 
-// Limpar campo de alerta
 function limparValor() {
-	if (document.getElementById('valorAlerta').value != "") {
-		document.getElementById('valorAlerta').value = "";
-	}
+	const campo = document.getElementById('valorAlerta');
+	if (campo.value !== "") campo.value = "";
 }
 
 function limparMoeda(numero) {
-	let valorSemSimbolo = numero.replace('R$', '').trim();
-	let valorSemMilhar = valorSemSimbolo.replace('.', '').replace(',', '.');
-	let preco = parseFloat(valorSemMilhar);
-	return preco;
+	const valorSemSimbolo = numero.replace('R$', '').trim();
+	const valorSemMilhar = valorSemSimbolo.replace('.', '').replace(',', '.');
+	return parseFloat(valorSemMilhar);
 }
+
+function apagarAlertas(index) {
+	let alertas = JSON.parse(localStorage.getItem('alertasjson')) || [];
+	alertas.splice(index, 1);
+	localStorage.setItem('alertasjson', JSON.stringify(alertas));
+	if (isPyWebView) {
+		pyWebviewSalvarAlerta(alertas);
+	}
+	carregarAlertas();
+}
+
+function carregarAlertas() {
+	const tabela = document.getElementById("alertasTabela").getElementsByTagName('tbody')[0];
+	tabela.innerHTML = '';
+
+	let alertas = [];
+	try {
+		alertas = JSON.parse(localStorage.getItem('alertasjson')) || [];
+		const alertasOrdenados = [...alertas].sort((a, b) => b.valor - a.valor);
+		if (JSON.stringify(alertas) !== JSON.stringify(alertasOrdenados)) {
+			localStorage.setItem('alertasjson', JSON.stringify(alertasOrdenados));
+			alertas = alertasOrdenados;
+		}
+	} catch (e) {
+		console.error("Erro ao parsear alertas do localStorage:", e);
+	}
+
+	// Usar DocumentFragment para inserir todas as linhas de uma vez (evita múltiplos reflows)
+	const fragment = document.createDocumentFragment();
+
+	alertas.forEach((valorAlerta, index) => {
+		const valorAlertaFormatado = parseFloat(valorAlerta.valor).toLocaleString('pt-BR', {
+			style: 'currency',
+			currency: 'BRL',
+			minimumFractionDigits: 2
+		});
+
+		const novaLinha = document.createElement('tr');
+
+		// Célula de tipo
+		const celulatipo = document.createElement('td');
+		const botaotipo = document.createElement("button");
+		botaotipo.className = "botaoTipo"; // corrigido: classe em vez de ID duplicado
+		botaotipo.type = "button";
+		botaotipo.onclick = function() {
+			mudarTipo(index);
+			fazerTransicaoAlarme();
+		};
+		if (valorAlerta.tipo === TIPO_MAIOR) {
+			botaotipo.textContent = "Maior △";
+			botaotipo.title = "Alertar quando BTC for maior que " + valorAlertaFormatado;
+			botaotipo.style.opacity = "1";
+		} else if (valorAlerta.tipo === TIPO_MENOR) {
+			botaotipo.textContent = "Menor ▽";
+			botaotipo.title = "Alertar quando BTC for menor que " + valorAlertaFormatado;
+			botaotipo.style.opacity = "1";
+		} else if (valorAlerta.tipo === TIPO_DESATIVADO) {
+			botaotipo.textContent = "Desativado";
+			botaotipo.title = "Alarme desativado";
+			botaotipo.style.opacity = "0.5";
+		}
+		celulatipo.appendChild(botaotipo);
+		novaLinha.appendChild(celulatipo);
+
+		// Célula de valor
+		const celulaValor = document.createElement('td');
+		celulaValor.textContent = valorAlertaFormatado;
+		celulaValor.title = valorAlertaFormatado;
+		novaLinha.appendChild(celulaValor);
+
+		// Célula de ação
+		const celulaAcao = document.createElement('td');
+		const botaoApagar = document.createElement("button");
+		botaoApagar.className = "botaoApagar"; // corrigido: classe em vez de ID duplicado
+		botaoApagar.textContent = "Apagar";
+		botaoApagar.title = "Apagar alarme " + valorAlertaFormatado;
+		botaoApagar.onclick = function() { apagarAlertas(index); };
+		celulaAcao.appendChild(botaoApagar);
+		novaLinha.appendChild(celulaAcao);
+
+		fragment.appendChild(novaLinha);
+	});
+
+	tabela.appendChild(fragment); // Inserção única no DOM
+
+	// Limpa e foca o campo
+	const campoValor = document.getElementById('valorAlerta');
+	campoValor.value = "";
+	campoValor.focus();
+
+	// Remove o listener anterior antes de adicionar um novo (evita acúmulo de listeners)
+	if (valorAlertaKeydownHandler) {
+		campoValor.removeEventListener('keydown', valorAlertaKeydownHandler);
+	}
+	valorAlertaKeydownHandler = function(event) {
+		if (event.key === 'Enter') {
+			event.preventDefault();
+			if (document.getElementById("modalAlerta").style.display === "block" && this.value.trim() !== '') {
+				criarAlerta();
+			}
+		}
+		if (event.key === 'Escape') {
+			if (document.getElementById("modalAlerta").style.display === "block") {
+				voltarAlerta();
+			}
+		}
+	};
+	campoValor.addEventListener('keydown', valorAlertaKeydownHandler);
+}
+
+function mudarTipo(index, desativarForçado = false) {
+	let alertas = [];
+	try {
+		alertas = JSON.parse(localStorage.getItem('alertasjson')) || [];
+	} catch (e) {
+		console.error("Erro ao parsear alertas do localStorage:", e);
+		return;
+	}
+
+	if (index < 0 || index >= alertas.length) {
+		console.error("Índice de alerta inválido:", index);
+		return;
+	}
+
+	const valor = alertas[index].valor;
+	const tipoOriginal = alertas[index].tipo;
+
+	let tipoAlterado;
+	if (desativarForçado) {
+		tipoAlterado = TIPO_DESATIVADO;
+	} else if (tipoOriginal === TIPO_MAIOR) {
+		tipoAlterado = TIPO_MENOR;
+	} else if (tipoOriginal === TIPO_MENOR) {
+		tipoAlterado = TIPO_DESATIVADO;
+	} else if (tipoOriginal === TIPO_DESATIVADO) {
+		tipoAlterado = TIPO_MAIOR;
+	} else {
+		console.warn("Tipo de alerta desconhecido:", tipoOriginal);
+		return;
+	}
+
+	alertas[index].tipo = tipoAlterado;
+
+	// Checar duplicata com o novo tipo (excluindo o próprio alerta)
+	const alertaExistente = alertas.some((a, i) => a.valor === valor && a.tipo === tipoAlterado && i !== index);
+	if (alertaExistente) {
+		$.alert({
+			title: 'FALHA',
+			content: 'Existe um alerta com esse mesmo valor.',
+			theme: 'dark',
+			draggable: false,
+			boxWidth: '300px',
+			useBootstrap: false,
+			autoClose: 'ok|5000',
+		});
+		return;
+	}
+
+	try {
+		localStorage.setItem('alertasjson', JSON.stringify(alertas));
+		if (isPyWebView) {
+			pyWebviewSalvarAlerta(alertas);
+		}
+	} catch (e) {
+		console.error("Erro ao salvar alertas no localStorage:", e);
+	}
+
+	carregarAlertas();
+}
+
+// ---------------------------------------------------------------------------
+// Áudio de alerta
+// ---------------------------------------------------------------------------
 
 function tocarAlerta(repeticoes = 1, volume = 1) {
 	const audio = new Audio('alerta.mp3');
 	audio.volume = volume;
+	audio.preload = 'auto';
 	let contador = 0;
 
-	// Definir o preload para carregar o áudio automaticamente
-	audio.preload = 'auto';
-
-	// Garantir que o áudio esteja carregado antes de tocar
 	audio.addEventListener('canplaythrough', () => {
 		const tocar = () => {
 			if (contador < repeticoes) {
-				audio.play().catch(error => {
+				audio.play().catch(() => {
 					$.alert({
 						title: 'FALHA',
 						content: 'Falha ao reproduzir áudio.',
@@ -698,86 +723,23 @@ function tocarAlerta(repeticoes = 1, volume = 1) {
 					});
 				});
 				contador++;
-
-				// Usar setTimeout para criar um pequeno atraso entre as repetições
-				audio.onended = () => {
-					setTimeout(tocar, 100); // 100ms de atraso
-				};
+				audio.onended = () => setTimeout(tocar, 100);
 			}
 		};
-
-		// Começar a reprodução
 		tocar();
-	});
+	}, { once: true }); // 'once: true' evita acúmulo do listener no mesmo objeto de audio
 
-	// Carregar o áudio
 	audio.load();
 }
 
-function verificarCarregamento() {
-	if (document.getElementById('info-price').textContent == '') {
-		loadingTime *= 1.2;
-		if (loadingTime > 2000) {
-			location.reload();
-		}
-		setTimeout(verificarCarregamento, loadingTime);
-	} else {
-		document.getElementById('tela-carregamento').style.display = 'none';
-		document.getElementById('conteudo').style.display = 'block';
-		loadingTime = 100;
-		// Iniciar a função de sincronia com o Backend Python
-		if (navigator.userAgent == "pywebview") {
-			sincronizaAlertas();
-		}
-		
-/* 		// Aplicar um contador
-		var wts=document.createElement('script');
-		wts.async=true;
-		wts.src='https://app.ardalio.com/log7.js';
-		document.head.appendChild(wts);
-		wts.onload = function(){
-			wtslog7(2193605,5);
-		}; */
-		
-		// Pausar alarmes por 5s
-		fazerTransicaoAlarme(5000);
-	}
-}
+// ---------------------------------------------------------------------------
+// Inicialização
+// ---------------------------------------------------------------------------
 
-// Testar se estão disponíveis e enviar notificações // Não usada
-function prepararNotificacao(conteudo = "") {
-	if ("Notification" in window) {
-		if (Notification.permission === "default") {
-			Notification.requestPermission().then(function(permission) {
-				if (permission === "granted") {
-					console.log("Permissão para notificações concedida!");
-				} else {
-					console.log("Permissão negada para notificações.");
-					console.log(Notification.permission)
-				}
-			});
-		} else {
-			console.log(Notification.permission)
-			new Notification("Aqui está sua notificação!", {
-				body: "Você pode personalizar o corpo da notificação.",
-				icon: "btc-logo.svg",
-			});
-		}
-	}
-}
-
-// Função anônima para executar várias funções no load
 window.addEventListener('load', () => {
 	botoesPywebview();
 	inicial();
 	atualiza_taxas();
-	// Remove a tela de carregamento depois de carregar certos elementos e mostra o conteúdo
 	setTimeout(verificarCarregamento, loadingTime);
-	// Monitora o teclado e o mouse por qualquer ação para resetar a inatividade
-	document.addEventListener('keydown', resetarInatividade);
-	document.addEventListener('mousemove', resetarInatividade);
-	// Verificando a inatividade a cada segundo
-	setInterval(verificarInatividade, tempoVerificarInatividade);
-	// Conferir se as notificações são possíveis, se estão ativas e pedir autorização se não estiverem
-	// prepararNotificacao();
+	setInterval(verificarInatividade, TEMPO_VERIFICAR_INATIVIDADE);
 });
