@@ -39,7 +39,7 @@ ALERTA_ATIVO_DISTANTE = [{"id": "a", "valor": 1000, "tipo": "menor"}]
 SO_DESATIVADOS = [{"id": "a", "valor": 1000, "tipo": "desativado"}]
 
 # Guarda os relatórios enviados: cada relatório zera os contadores do Metricas, e o de
-# abertura sai já no 1º preço (gráfico oculto). Ver contadores() e marcos_da_pagina().
+# abertura (gráfico oculto) é montado logo depois da ponte. Ver contadores() e marcos_da_pagina().
 PYWEBVIEW_TARDIO = """
 window.__relatorios = [];
 window.addEventListener('load', () => setTimeout(() => {
@@ -553,7 +553,10 @@ def test_relatorio_de_abertura_traz_a_1a_requisicao_a_cada_servidor(navegador):
 
 
 def test_relatorio_de_abertura_nao_espera_o_grafico_oculto(navegador):
-    """Com o gráfico oculto (padrão), o relatório sai no 1º preço, sem esperar os 15 s."""
+    """Com o gráfico oculto (padrão), o relatório sai ao fim da abertura (alertas lidos, logo
+    depois da ponte), sem esperar os 15 s. Ele precisa trazer o "load" e a ponte: montado já
+    no 1º preço, perderia todos os marcos posteriores (e o medir_abertura.py fecha o app
+    assim que o relatório de abertura chega)."""
     contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=False, com_alertas=False,
                                           user_agent="Mozilla/5.0 pywebview")
     contexto.add_init_script(CAPTURAR_RELATORIOS)
@@ -561,7 +564,8 @@ def test_relatorio_de_abertura_nao_espera_o_grafico_oculto(navegador):
     esperar_carregamento(pagina)
     pagina.wait_for_function("window.__relatorios.some(r => r.motivo === 'abertura')", timeout=5000)
     abertura = pagina.evaluate("window.__relatorios.find(r => r.motivo === 'abertura')")
-    assert "primeiro_preco" in abertura["marcos"], abertura["marcos"]
+    for marco in ("primeiro_preco", "nav_load", "api_python_pronta", "alertas_sincronizados"):
+        assert marco in abertura["marcos"], (marco, abertura["marcos"])
     assert "grafico_carregado" not in abertura["marcos"], abertura["marcos"]
     assert not erros, erros
     contexto.close()
@@ -614,8 +618,8 @@ def abrir_pelo_servidor(navegador, busca, segurar_binance: bool = False, falhar_
 
 
 def _esperar_relatorio_de_abertura(pagina) -> None:
-    """O relatório de abertura é montado no 1º preço (e zera os contadores nesse instante), mas
-    só chega ao registrar_metricas depois da ponte. Até lá, os contadores não estão em lugar nenhum."""
+    """O relatório de abertura zera os contadores ao ser montado, e a entrega ao registrar_metricas
+    passa pela ponte. Entre uma coisa e outra, os contadores não estão em lugar nenhum."""
     pagina.wait_for_function(
         "typeof window.__relatorios === 'undefined' || !carregado"
         " || window.__relatorios.some(r => r.motivo === 'abertura')",
