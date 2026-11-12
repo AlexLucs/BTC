@@ -38,13 +38,16 @@ ALERTA_QUE_DISPARARIA = [{"id": "a", "valor": 100, "tipo": "maior"}]
 ALERTA_ATIVO_DISTANTE = [{"id": "a", "valor": 1000, "tipo": "menor"}]
 SO_DESATIVADOS = [{"id": "a", "valor": 1000, "tipo": "desativado"}]
 
+# Guarda os relatórios enviados: cada relatório zera os contadores do Metricas, e o de
+# abertura sai já no 1º preço (gráfico oculto). Ver contadores() e marcos_da_pagina().
 PYWEBVIEW_TARDIO = """
+window.__relatorios = [];
 window.addEventListener('load', () => setTimeout(() => {
     window.pywebview = { api: {
         carregar_alerta: async () => [],
         salvar_alerta: async () => true,
         esta_no_topo: async () => false,
-        registrar_metricas: async () => true,
+        registrar_metricas: async relatorio => { window.__relatorios.push(relatorio); return true; },
     } };
     window.dispatchEvent(new Event('pywebviewready'));
 }, 300));
@@ -55,7 +58,11 @@ window.addEventListener('load', () => setTimeout(() => {
 # abertura COM o gráfico tiram o atributo antes de o script.js lê-lo: o listener do init
 # script é registrado antes do script.js e roda primeiro no DOMContentLoaded.
 MOSTRAR_GRAFICO_AO_ABRIR = """
-document.addEventListener('DOMContentLoaded', () => { document.getElementById('grafico').hidden = false; });
+document.addEventListener('DOMContentLoaded', () => {
+    // O init script roda em todos os frames (inclusive no iframe do TradingView, sem #grafico).
+    const grafico = document.getElementById('grafico');
+    if (grafico) grafico.hidden = false;
+});
 """
 
 
@@ -607,7 +614,20 @@ def abrir_pelo_servidor(navegador, busca, segurar_binance: bool = False, falhar_
 
 
 def contadores(pagina) -> dict:
-    return pagina.evaluate("Metricas.resumo().contadores")
+    """Contadores da página somados aos dos relatórios já enviados (cada relatório os zera)."""
+    return pagina.evaluate("""() => {
+        const soma = {};
+        for (const c of [...(window.__relatorios ?? []).map(r => r.contadores ?? {}), Metricas.resumo().contadores]) {
+            for (const [nome, valor] of Object.entries(c)) soma[nome] = (soma[nome] ?? 0) + valor;
+        }
+        return soma;
+    }""")
+
+
+def marcos_da_pagina(pagina) -> dict:
+    """Marcos da página junto com os dos relatórios já enviados (caso um relatório os tenha zerado)."""
+    return pagina.evaluate("""() => Object.assign({},
+        ...(window.__relatorios ?? []).map(r => r.marcos ?? {}), Metricas.marcos)""")
 
 
 def test_primeiro_preco_vem_no_html_antes_do_load(navegador):
@@ -619,7 +639,7 @@ def test_primeiro_preco_vem_no_html_antes_do_load(navegador):
     esperar_carregamento(pagina)  # sem nenhuma resposta da Binance
     assert texto(pagina, "#info-price") == "R$ 123.456,00"
     assert contadores(pagina).get("primeiro_preco:html") == 1
-    marcos = pagina.evaluate("Metricas.marcos")
+    marcos = marcos_da_pagina(pagina)
     assert marcos["preco_no_html"] <= marcos["primeiro_preco"] <= marcos["nav_load"], marcos
     assert not any("preco-inicial" in url for url in pedidos), pedidos
     assert rede.contagem["binance"] == 0 and len(rede._segurados) == 0  # nem o REST foi preciso
@@ -641,7 +661,7 @@ def test_primeiro_preco_do_python_aparece_sem_esperar_o_rest_nem_a_ponte(navegad
     esperar_carregamento(pagina)  # sem nenhuma resposta da Binance
     assert texto(pagina, "#info-price") == "R$ 123.456,00"
     assert contadores(pagina).get("primeiro_preco:python") == 1
-    marcos = pagina.evaluate("Metricas.marcos")
+    marcos = marcos_da_pagina(pagina)
     assert "api_python_pronta" not in marcos or marcos["primeiro_preco"] < marcos["api_python_pronta"], marcos
     assert marcos["preco_inicial_pedido"] <= marcos["preco_inicial_resposta"] <= marcos["preco_inicial_dados"] \
         <= marcos["precos_continuacao"] <= marcos["primeiro_preco"], marcos
