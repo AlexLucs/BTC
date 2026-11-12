@@ -3,194 +3,204 @@
 
 <head>
     <meta charset="UTF-8">
+    <!--
+        CSP: restringe de onde vêm scripts, estilos e conexões.
+        - 'unsafe-eval' é exigido pelo pywebview (api.js monta a ponte JS→Python com new Function).
+        - 'unsafe-inline' em style-src: pywebview e TradingView injetam <style>.
+        - file: cobre o carregamento local do app (index.html aberto por caminho absoluto).
+        Ao trocar de API ou de widget, atualize connect-src / script-src / frame-src.
+    -->
+    <meta http-equiv="Content-Security-Policy" content="
+        default-src 'none';
+        script-src 'self' file: 'unsafe-eval' https://s3.tradingview.com;
+        style-src 'self' file: 'unsafe-inline';
+        font-src 'self' file:;
+        img-src 'self' file: data:;
+        media-src 'self' file:;
+        connect-src https://api.binance.com wss://stream.binance.com:9443 https://economia.awesomeapi.com.br https://mempool.space;
+        frame-src https://*.tradingview.com https://*.tradingview-widget.com;
+        base-uri 'none';
+        form-action 'none'">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link id="favicon" rel="icon" href="btc-logo.svg">
     <title>BTC Status - Monitoramento de Preço do Bitcoin</title>
-    <!-- Incluindo CSS e JS de terceiros -->
-    <link rel="stylesheet" href="jquery-confirm.min.css">
+    <!-- A fonte começa a ser lida junto com o HTML: o "load" da página (que libera a ponte
+         do pywebview) espera por ela. SEM "crossorigin": a página é aberta por file:// e,
+         nesse caso, o Chromium só aproveita o preload sem o atributo (com ele, avisa que o
+         modo de credenciais não confere e lê a fonte duas vezes). -->
+    <link rel="preload" href="Roboto.woff2" as="font" type="font/woff2">
     <link rel="stylesheet" href="style.css">
-    <script src="jquery.min.js"></script>
-    <script src="jquery-confirm.min.js"></script>
-    <!-- Incluindo script principal da aplicação -->
-    <script src="script.js"></script>
+    <script src="metricas.js" defer></script>
+    <script src="regras.js" defer></script>
+    <script src="script.js" defer></script>
 </head>
 
 <body>
-    <!-- Container principal com funcionalidade de arrastar pywebview -->
+    <!-- Container principal; a classe permite arrastar a janela sem moldura do pywebview -->
     <div id="conteudo" class="pywebview-drag-region">
-        <!-- Botões de controle da janela -->
+        <!-- Controles da janela (ocultos por padrão; script.js exibe os que se aplicam) -->
         <div class="botao">
-            <div class="btns" id="centralizar-btn" title="Centralizar" onclick="pyWebviewCentralizar()" alt="Centralizar">▣</div>
-            <div class="btns" id="reload-btn" title="Atualizar" onclick="reiniciar()" alt="Atualizar">↻</div>
-            <div class="btns" id="pausar-btn" title="Pausar/Iniciar" onclick="pararIniciar()" alt="Pausar/Iniciar">■</div> <!-- Título do botão corrigido para Pausar/Iniciar -->
-            <div class="btns" id="fixar-btn" title="Fixar no Topo" onclick="pyWebviewFixar()" alt="Fixar ao Topo">△</div> <!-- Título do botão corrigido para Fixar ao Topo -->
-            <div class="btns" id="alerta-btn" title="Alertas de Preço" onclick="mostrarTelaAlerta()" alt="Alertas de Preço">⏱︎</div> <!-- Título do botão corrigido para Alertas de Preço -->
-            <div class="btns" id="minimize-btn" title="Minimizar" onclick="pyWebviewMinimize()" alt="Minimizar Janela">_</div> <!-- Título do botão corrigido para Minimizar Janela -->
-            <div class="btns" id="close-btn" title="Fechar" onclick="pyWebviewFechar()" alt="Fechar Aplicação">x</div> 
-			<div class="btns" id="grafico-btn" title="Gráfico/Dados" onclick="graficoAlternar()" alt="Alternar entre Gráfico e Dados">⇄</div>
+            <button type="button" class="btns" id="centralizar-btn" title="Centralizar" aria-label="Centralizar">▣</button>
+            <button type="button" class="btns" id="reload-btn" title="Atualizar" aria-label="Atualizar">↻</button>
+            <button type="button" class="btns" id="pausar-btn" title="Pausar" aria-label="Pausar">■</button>
+            <button type="button" class="btns" id="fixar-btn" title="Fixar no topo" aria-label="Fixar no topo">△</button>
+            <button type="button" class="btns" id="alerta-btn" title="Alertas de preço" aria-label="Alertas de preço">⏱︎</button>
+            <button type="button" class="btns" id="minimize-btn" title="Minimizar" aria-label="Minimizar">_</button>
+            <button type="button" class="btns" id="close-btn" title="Fechar" aria-label="Fechar">x</button>
+            <button type="button" class="btns" id="grafico-btn" title="Mostrar/ocultar gráfico" aria-label="Mostrar ou ocultar gráfico">⇄</button>
         </div>
-        <!-- Container para gráfico -->
-        <div id="grafico" class="grafico" title="Gráfico" alt="Gráfico">
-			<!-- TradingView Widget BEGIN -->
-			<div class="tradingview-widget-container">
-			  <div class="tradingview-widget-container__widget"></div>
-			  <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-symbol-overview.js" async>
-			  {
-			  "lineWidth": 2,
-			  "lineType": 0,
-			  "chartType": "candlesticks",
-			  "fontColor": "rgba(100, 100, 100, 1)",
-			  "gridLineColor": "rgba(242, 242, 242, 0.06)",
-			  "volumeUpColor": "rgba(34, 171, 148, 0.5)",
-			  "volumeDownColor": "rgba(247, 82, 95, 0.5)",
-			  "backgroundColor": "rgba(0, 0, 0, 1)",
-			  "widgetFontColor": "rgba(100, 100, 100, 1)",
-			  "upColor": "rgba(247, 147, 26, 1)",
-			  "downColor": "rgba(100, 100, 100, 1)",
-			  "borderUpColor": "rgba(247, 147, 26, 1)",
-			  "borderDownColor": "rgba(100, 100, 100, 1)",
-			  "wickUpColor": "rgba(247, 147, 26, 1)",
-			  "wickDownColor": "rgba(100, 100, 100, 1)",
-			  "colorTheme": "dark",
-			  "isTransparent": false,
-			  "locale": "br",
-			  "chartOnly": true,
-			  "scalePosition": "right",
-			  "scaleMode": "Normal",
-			  "fontFamily": "Roboto",
-			  "valuesTracking": "1",
-			  "changeMode": "no-values",
-			  "symbols": [
-				[
-				  "BINANCE:BTCBRL|5D"
-				]
-			  ],
-			  "dateRanges": [
-				"1d|15",
-				"5d|60"
-			  ],
-			  "fontSize": "10",
-			  "headerFontSize": "small",
-			  "autosize": false,
-			  "dateFormat": "dd/MM/yy",
-			  "width": 440,
-			  "height": 310,
-			  "noTimeScale": false,
-			  "hideDateRanges": false
-			}
-			  </script>
-			</div>
-			<!-- TradingView Widget END -->		
-		</div> <!-- Título e alt atualizados para refletir a não implementação -->
-        <!-- Overlay para indicar estado de pausa/inatividade -->
-		<div id="overlay" class="overlay" title="Clique para Reiniciar Monitoramento" onclick="pararIniciar()" alt="Clique para Reiniciar Monitoramento">⏸</div> <!-- Título e alt atualizados para refletir a ação de reiniciar o monitoramento -->
-        <!-- Background escuro para o modal de alerta -->
-        <div id="darkback" onclick="mostrarTelaAlerta()" class="overlay"></div>
-	    <!-- Tela de carregamento inicial -->
-	    <div id="tela-carregamento">
+
+        <!-- Gráfico de candles BTC/BRL (widget externo do TradingView).
+             O widget fica no <template> e só é montado em #grafico enquanto está visível
+             e o monitoramento está ativo (script.js: atualizarGrafico). -->
+        <div id="grafico" class="grafico" title="Gráfico"></div>
+        <template id="grafico-modelo">
+            <div class="tradingview-widget-container">
+                <div class="tradingview-widget-container__widget"></div>
+                <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-symbol-overview.js" async>
+                {
+                    "lineWidth": 2,
+                    "lineType": 0,
+                    "chartType": "candlesticks",
+                    "fontColor": "rgba(100, 100, 100, 1)",
+                    "gridLineColor": "rgba(242, 242, 242, 0.06)",
+                    "volumeUpColor": "rgba(34, 171, 148, 0.5)",
+                    "volumeDownColor": "rgba(247, 82, 95, 0.5)",
+                    "backgroundColor": "rgba(0, 0, 0, 1)",
+                    "widgetFontColor": "rgba(100, 100, 100, 1)",
+                    "upColor": "rgba(247, 147, 26, 1)",
+                    "downColor": "rgba(100, 100, 100, 1)",
+                    "borderUpColor": "rgba(247, 147, 26, 1)",
+                    "borderDownColor": "rgba(100, 100, 100, 1)",
+                    "wickUpColor": "rgba(247, 147, 26, 1)",
+                    "wickDownColor": "rgba(100, 100, 100, 1)",
+                    "colorTheme": "dark",
+                    "isTransparent": false,
+                    "locale": "br",
+                    "chartOnly": true,
+                    "scalePosition": "right",
+                    "scaleMode": "Normal",
+                    "fontFamily": "Roboto",
+                    "valuesTracking": "1",
+                    "changeMode": "no-values",
+                    "symbols": [["BINANCE:BTCBRL|5D"]],
+                    "dateRanges": ["1d|15", "5d|60"],
+                    "fontSize": "10",
+                    "headerFontSize": "small",
+                    "autosize": false,
+                    "dateFormat": "dd/MM/yy",
+                    "width": 440,
+                    "height": 310,
+                    "noTimeScale": false,
+                    "hideDateRanges": false
+                }
+                </script>
+            </div>
+        </template>
+
+        <!-- Exibido quando o monitoramento está pausado (manual, por falhas ou por inatividade) -->
+        <div id="overlay" class="overlay" title="Clique para retomar o monitoramento" aria-label="Retomar monitoramento" role="button">⏸</div>
+        <!-- Fundo escurecido atrás da tela de alertas; clicar fecha a tela -->
+        <div id="darkback" class="overlay"></div>
+
+        <!-- Tela de carregamento inicial -->
+        <div id="tela-carregamento">
             <div class="girando">⟳</div>
-            <div id="close-btn-carregamento" title="Fechar" onclick="pyWebviewFechar()" alt="Fechar">x</div>
+            <button type="button" id="close-btn-carregamento" title="Fechar" aria-label="Fechar">x</button>
         </div>
-        <!-- Modal de Alertas -->
+
+        <!-- Tela de cadastro de alertas -->
         <div id="modalAlerta" class="modal">
             <div class="modal-content">
-                <p title="Alertas" alt="Lista de alertas">ALERTAS</p> <!-- Título do modal -->
+                <p>ALERTAS</p>
                 <form id="inputForm">
-                    <input type="number" id="valorAlerta" name="valor" title="Valor em Reais a ser monitorado." placeholder="Digite o valor em Reais" required> </br> <!-- Placeholder adicionado para guiar o usuário -->
-                    <table id="alertasTabela">
-                        <thead>
-						</thead>
-                        <tbody>
-                            <!-- Linhas de alerta serão inseridas aqui por script.js -->
-                        </tbody>
-                    </table>
+                    <input type="number" id="valorAlerta" name="valor" min="0.01" step="0.01"
+                        title="Valor em reais a ser monitorado." placeholder="Digite o valor em Reais" required>
+                    <!-- Só a lista rola: campo e botões ficam sempre visíveis -->
+                    <div id="listaAlertas">
+                        <table id="alertasTabela">
+                            <tbody>
+                                <!-- Linhas inseridas por script.js -->
+                            </tbody>
+                        </table>
+                    </div>
                     <div id="botoesAlerta">
-                        <button type="button" id="salvarBotao" title="Criar Alerta" onclick="criarAlerta()">Criar Alerta</button>  <!-- Texto do botão corrigido para Criar Alerta -->
-                        <button type="button" id="voltarBotao" title="Fechar Alertas" onclick="voltarAlerta()">Voltar</button>
+                        <button type="button" class="botao-padrao" id="salvarBotao" title="Criar alerta">Criar Alerta</button>
+                        <button type="button" class="botao-padrao" id="voltarBotao" title="Fechar alertas">Voltar</button>
                     </div>
                 </form>
             </div>
         </div>
-        <!-- Container principal de informações (abaixo dos botões) -->
+
+        <!-- Informações principais -->
         <div id="conteudoMenosBotoes">
-            <!-- Logo do Bitcoin -->
-            <div id="info-logo" title="Bitcoin Monitor" alt="Logo do Bitcoin">₿</div>
-            <!-- Preço do Bitcoin em BRL -->
-            <div id="info-price" class="btc_em_brl_principal" title="Preço atual do Bitcoin em Reais (BRL). Dados da Binance©."></div> <!-- Preço do Bitcoin em USDT -->
-            <div id="info-usdt" class="btc_em_usdt_secundariol" title="Preço atual do Bitcoin em Dólares Americanos (USDT). Dados da Binance©."></div> <!-- Título corrigido para melhor clareza -->
-            <!-- Preço do Dólar (cálculo próprio + B3) -->
-            <div id="info-dolar" class="dolar_btc_e_b3" title="Preço do dólar calculado (BTC/BRL da Binance / BTC/USD da Binance) | Dólar B3. Dados AwesomeAPI© e Binance©"></div> <!-- Título e alt atualizados para refletir a fonte de dados combinada -->
-            <!-- Variação percentual do preço -->
-            <div class="percentual" title="Variação percentual do preço do Bitcoin nas últimas 24 horas."> <!-- Título corrigido para horas -->
+            <div id="info-logo" title="Bitcoin Monitor">₿</div>
+            <div id="info-price" class="btc_em_brl_principal" title="Preço atual do Bitcoin em Reais (BRL). Dados da Binance©."></div>
+            <div id="info-usdt" class="btc_em_usdt_secundario" title="Preço atual do Bitcoin em dólares (USDT). Dados da Binance©."></div>
+            <div id="info-dolar" class="dolar_btc_e_b3" title="Dólar implícito (BTC/BRL ÷ BTC/USDT, Binance©) | Dólar comercial (AwesomeAPI©)."></div>
+            <div class="percentual" title="Variação percentual do preço do Bitcoin nas últimas 24 horas.">
                 <span id="info-percent"></span>
-                <span id="info-seta" class="aparecer"></span>
+                <span id="info-seta"></span>
             </div>
-            <!-- Data e hora da última atualização -->
             <div id="info-time" class="horario_atualizacao" title="Data e hora da última atualização."></div>
-            <!-- Informações detalhadas e taxas -->
+
+            <!-- Máximas/mínimas de 24h e taxas da rede -->
             <div class="bottom-left-info">
                 <table>
-                    <tbody> <!-- Adicionado tbody para semântica correta da tabela -->
+                    <tbody>
+                        <tr><td colspan="2"><hr class="separator"></td></tr>
+                        <tr title="Preço máximo do Bitcoin em Reais nas últimas 24 horas. Dados da Binance©.">
+                            <td class="rotulo">Máxima:</td>
+                            <td class="valor" id="highPrice"></td>
+                        </tr>
+                        <tr title="Preço mínimo do Bitcoin em Reais nas últimas 24 horas. Dados da Binance©.">
+                            <td class="rotulo">Mínima:</td>
+                            <td class="valor" id="lowPrice"></td>
+                        </tr>
+                        <tr title="Preço máximo do Bitcoin em dólares (USDT) nas últimas 24 horas. Dados da Binance©.">
+                            <td class="rotulo">Máx. USDT:</td>
+                            <td class="valor" id="highPriceDol"></td>
+                        </tr>
+                        <tr title="Preço mínimo do Bitcoin em dólares (USDT) nas últimas 24 horas. Dados da Binance©.">
+                            <td class="rotulo">Mín. USDT:</td>
+                            <td class="valor" id="lowPriceDol"></td>
+                        </tr>
+                        <tr><td colspan="2"><hr class="separator"></td></tr>
                         <tr>
-                            <td colspan="2">
-                                <hr class="separator">
-                            </td>
+                            <td id="taxa_topico" colspan="2" title="Taxas estimadas de transação Bitcoin. Fonte: mempool.space©. Atualizadas a cada 50–70 s.">Taxas de Rede</td>
                         </tr>
-                        <tr title="Preço máximo do Bitcoin em Reais nas últimas 24 horas. Dados da Binance©."> <!-- Título corrigido para horas e não hrs -->
-                            <td id="highPriceE">Máxima:</td>
-                            <td id="highPrice"></td>
+                        <tr><td colspan="2"><hr class="separator"></td></tr>
+                        <tr title="Taxa mínima estimada (menor prioridade, confirmação mais demorada).">
+                            <td class="rotulo">Mínima:</td>
+                            <td class="valor" id="minimumFee"></td>
                         </tr>
-                        <tr title="Preço mínimo do Bitcoin em Reais nas últimas 24 horas. Dados da Binance©."> <!-- Título corrigido para horas e não hrs -->
-                            <td id="lowPriceE">Mínima:</td>
-                            <td id="lowPrice"></td>
+                        <tr title="Taxa estimada para confirmação em ~1 hora.">
+                            <td class="rotulo">~1 hora:</td>
+                            <td class="valor" id="hourFee"></td>
                         </tr>
-                        <tr title="Preço máximo do Bitcoin em Dólares Americanos (USD) nas últimas 24 horas. Dados da Binance©."> <!-- Título corrigido para horas e não hrs -->
-                            <td id="highPriceDolE">Máx. USDT:</td> <!-- Abreviado para Max. USDT para melhor caber em telas menores -->
-                            <td id="highPriceDol"></td>
+                        <tr title="Taxa estimada para confirmação em ~30 minutos.">
+                            <td class="rotulo">~30 min:</td>
+                            <td class="valor" id="halfHourFee"></td>
                         </tr>
-                        <tr title="Preço mínimo do Bitcoin em Dólares Americanos (USD) nas últimas 24 horas. Dados da Binance©."> <!-- Título corrigido para horas e não hrs -->
-                            <td id="lowPriceDolE">Mín. USDT:</td> <!-- Abreviado para Min. USDT para melhor caber em telas menores -->
-                            <td id="lowPriceDol"></td>
+                        <tr title="Taxa de prioridade estimada (confirmação no próximo bloco).">
+                            <td class="rotulo">Próximo bloco:</td>
+                            <td class="valor" id="fastestFee"></td>
                         </tr>
-                        <tr>
-                            <td colspan="2">
-                                <hr class="separator">
-                            </td>
-                        </tr>
-                        <tr>
-                            <td id="taxa_topico" colspan="2" title="Valores estimados para taxas de transação Bitcoin. Fonte: Mempool.space©. Atualizado a cada minuto.">Taxas de Rede</td> <!-- Título e alt atualizados para refletir a fonte de dados e a atualização por minuto -->
-                        </tr>
-                        <tr>
-                            <td colspan="2">
-                                <hr class="separator">
-                            </td>
-                        </tr>
-                        <tr title="Taxa mínima estimada para transação Bitcoin (menor prioridade, confirmação mais demorada)."> <!-- Título e alt para descrições mais completas -->
-                            <td id="minimumFeeE">Mínima:</td>
-                            <td id="minimumFee"></td>
-                        </tr>
-                        <tr title="Taxa estimada para confirmação em ~1 hora para transação Bitcoin."> <!-- Título e alt para descrições mais completas -->
-                            <td id="hourFeeE">~1 hora:</td>
-                            <td id="hourFee"></td>
-                        </tr>
-                        <tr title="Taxa estimada para confirmação em ~30 minutos para transação Bitcoin."> <!-- Título e alt para descrições mais completas -->
-                            <td id="halfHourFeeE">~30 min:</td>
-                            <td id="halfHourFee"></td>
-                        </tr>
-                        <tr title="Taxa de prioridade estimada para transação Bitcoin (confirmação mais rápida)."> <!-- Título e alt para descrições mais completas -->
-                            <td id="fastestFeeE">Próximo bloco:</td>
-                            <td id="fastestFee"></td>
-                        </tr>
-                        <tr>
-                            <td colspan="2">
-                                <hr class="separator">
-                            </td>
-                        </tr>                        
+                        <tr><td colspan="2"><hr class="separator"></td></tr>
                     </tbody>
                 </table>
             </div>
         </div>
     </div>
+
+    <!-- Diálogo de avisos e alertas (fora da região de arrasto) -->
+    <dialog id="dialogo" aria-labelledby="dialogo-titulo">
+        <form method="dialog">
+            <h2 id="dialogo-titulo"></h2>
+            <p id="dialogo-conteudo"></p>
+            <button type="submit" class="botao-padrao" id="dialogo-ok">OK</button>
+        </form>
+    </dialog>
 </body>
 
 </html>

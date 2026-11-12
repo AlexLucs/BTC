@@ -1,0 +1,6 @@
+# Dependências de desenvolvimento: build do executável e testes.
+# Instalação: .venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+-r requirements.txt
+pyinstaller>=6.22,<7   # build: pyinstaller "BTC Monitor.spec"
+pytest>=9,<10          # testes: python -m pytest tests
+playwright>=1.48,<2    # desempenho da página: python -m pytest tests/desempenho -m desempenho

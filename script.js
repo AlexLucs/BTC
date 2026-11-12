@@ -1,142 +1,862 @@
 'use strict';
 
-// ---------------------------------------------------------------------------
-// Constantes de tipo de alerta (evita strings mágicas espalhadas no código)
-// ---------------------------------------------------------------------------
-const TIPO_MAIOR = "maior";
-const TIPO_MENOR = "menor";
-const TIPO_DESATIVADO = "desativado";
+// Depende de regras.js (TIPO, PROXIMO_TIPO, normalizarLista, ...) e de metricas.js
+// (Metricas), carregados antes.
+
+Metricas.marcar('script_inicio');
+Metricas.observar();
 
 // ---------------------------------------------------------------------------
-// Constante de ambiente — centraliza a checagem do user-agent
+// Ambiente e endpoints
 // ---------------------------------------------------------------------------
-const isPyWebView = navigator.userAgent.includes("pywebview");
+const isPyWebView = navigator.userAgent.includes('pywebview');
+
+// Um único pedido traz os dois pares (na Binance, "symbols" com 1 a 20 pares pesa 2,
+// o mesmo que um par só).
+const SIMBOLO_BRL = 'BTCBRL';
+const SIMBOLO_USDT = 'BTCUSDT';
+const URL_TICKERS = `https://api.binance.com/api/v3/ticker/24hr?symbols=${encodeURIComponent(JSON.stringify([SIMBOLO_BRL, SIMBOLO_USDT]))}`;
+// WebSocket da Binance (stream combinado <par>@ticker): preço a cada ~1 s, sem requisições.
+// O REST acima busca o 1º preço na abertura e serve de reserva quando o WebSocket cai.
+const URL_WS_TICKERS = `wss://stream.binance.com:9443/stream?streams=${[SIMBOLO_BRL, SIMBOLO_USDT].map(par => `${par.toLowerCase()}@ticker`).join('/')}`;
+const URL_USD_BRL = 'https://economia.awesomeapi.com.br/json/last/USD-BRL';
+const URL_TAXAS = 'https://mempool.space/api/v1/fees/precise';
+
+const CHAVE_ALERTAS = 'alertasjson';
+const CHAVE_ESTADO = 'ultimoEstado';     // último estado exibido (ver "Último estado salvo")
+const CAMPOS_TAXA = ['fastestFee', 'halfHourFee', 'hourFee', 'minimumFee'];
 
 // ---------------------------------------------------------------------------
-// Configurações de tempo
+// Tempos (ms). Cada ciclo espera "mínimo + aleatório(0..variação)" entre as
+// atualizações, para não sincronizar picos de requisição.
 // ---------------------------------------------------------------------------
-const UPDATE_TIME = 3000;        // Intervalo base de atualização de preço (ms)
-const UPDATE_TAXAS = 50000;      // Intervalo base de atualização de taxas (ms)
-const TEMPO_VERIFICAR_INATIVIDADE = 1000; // Intervalo do tick de inatividade (ms)
-const MAX_FALHAS = 10;           // Máximo de falhas consecutivas de API antes de pausar
+const PRECO_INTERVALO_MIN = 3000;
+const PRECO_INTERVALO_VARIACAO = 3000;
+const TAXAS_INTERVALO_MIN = 50000;
+const TAXAS_INTERVALO_VARIACAO = 20000;
+// A AwesomeAPI sem chave mantém cache de 1 min e tem cota mensal: consultar mais
+// que isso só gasta cota.
+const DOLAR_INTERVALO_MIN = 60000;
+const DOLAR_INTERVALO_VARIACAO = 10000;
+
+const WS_LIMITE_SILENCIO = 10000;  // nenhuma mensagem (BRL ou USDT) por 10 s: conexão considerada perdida
+const WS_RECONEXAO_MIN = 1000;     // espera da 1ª reconexão; dobra a cada tentativa
+const WS_RECONEXAO_MAX = 60000;
+const TIMEOUT_REQUISICAO = 8000;
+const TIMEOUT_API_PYTHON = 5000;
+const ATRASO_CHECAGEM_ALARMES = 1000;
+const SILENCIO_PADRAO = 15000;
+const SILENCIO_APOS_CARREGAR = 5000;
+const LIMITE_INATIVIDADE = 1000 * 1000; // ~17 min sem mouse/teclado pausa o monitoramento
+const INTERVALO_VERIFICAR_INATIVIDADE = 1000;
+const INTERVALO_SALVAR_ESTADO = 30000;  // no máximo uma gravação do último estado a cada 30 s
+const ESPERA_OCIOSA_GRAFICO = 300;      // prazo máximo do requestIdleCallback que monta o gráfico
+const INTERVALO_RELATORIO_METRICAS = 5 * 60 * 1000;
+const ESPERA_MAX_RELATORIO_ABERTURA = 15000; // após o 1º preço, se o gráfico não carregar antes
+const MAX_FALHAS = 10;             // falhas seguidas da cotação BTC/BRL antes de pausar
+const CICLOS_ANTES_SEM_DADOS = 3;  // falhas seguidas em que o último preço continua na tela
 
 // ---------------------------------------------------------------------------
-// Estado global
+// Formatadores (criados uma vez só)
 // ---------------------------------------------------------------------------
-let transicaoAlarme = 0;
-let contadorAlerta = 0;
-let lastPriceBRL;
+const formatoBRL = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
+const formatoUSD = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'USD' });
+const formatoTaxa = new Intl.NumberFormat('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const formatoData = new Intl.DateTimeFormat('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit' });
+const formatoHora = new Intl.DateTimeFormat('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+
+const SETA_POR_DIRECAO = { [-1]: '  ↓', 0: '↔', 1: '  ↑' };
+const SEM_VALOR = '—';
+// Web Animations API: reinicia o "surgimento" da seta sem forçar reflow.
+const ANIMACAO_SETA = [{ opacity: 0 }, { opacity: 1 }];
+const DURACAO_ANIMACAO_SETA = 1000;
+
+// ---------------------------------------------------------------------------
+// Estado
+// ---------------------------------------------------------------------------
+let ativo = false;
+let pausaManual = false;          // pausa pelo botão ou por falhas: só retoma com clique
+let geracaoCiclo = 0;             // invalida respostas de ciclos já encerrados
+let controleCiclo = new AbortController(); // cancela as requisições em andamento ao pausar
+let carregado = false;            // já chegou o 1º preço novo
+let conteudoVisivel = false;      // a tela de carregamento já saiu (estado salvo ou 1º preço)
+let exibindoEstadoSalvo = false;  // a tela mostra o último estado salvo, ainda sem dados novos
+let estadoAtual = null;           // último estado com dados novos, para gravar
+let ultimaGravacaoEstado = 0;
+
+// Últimos valores válidos. Continuam na tela por CICLOS_ANTES_SEM_DADOS falhas.
+let ultimoPrecoBRL = NaN;
+let ultimoPrecoUSD = NaN;
+let ultimaCotacaoDolar = NaN;
+let precoAnterior = NaN;          // referência da seta de direção
+let falhasBRL = 0;
+let falhasUSD = 0;
+
+let ws = null;                    // conexão atual com o stream da Binance
+let wsSaudavel = false;           // recebendo BTC/BRL pelo WebSocket: o polling REST fica parado
+let wsTentativas = 0;             // reconexões seguidas sem receber preço (define a espera)
+let cadeiaRestAtiva = false;      // há uma consulta REST de preço agendada ou em andamento
+let ultimaMensagemBRL = 0;        // performance.now() da última mensagem de BTC/BRL pelo WebSocket
+
+let alertas = [];                 // lista em memória (normalizada e ordenada): fonte da verdade no JS
+let alarmesSilenciados = false;
+let alertaAberto = false;
+let audioAlerta = null;
+
+let graficoVisivel = true;        // escolha do usuário pelo botão ⇄
+let fixado = false;
+let monitorarInatividade = true;  // desligado enquanto a janela está fixada no topo
+let ultimaInteracao = Date.now();
+
 let wakeLock = null;
-let loadingTime = 100;
-let tempoInatividade = 0;
-let varSetaMostrar;
-let varSetaOld;
-let ativo = true;
-let falhasConsecutivas = 0;
-let tempoLimite = 1000; // Tempo máximo de inatividade em segundos (~17 min)
+let pedindoWakeLock = false;
 
-// IDs de intervalo/timeout — declarados no escopo global para acesso em todo o script
-let intervaloID;
-let taxaIntervaloID;
-let alarmesID;
-let transicaoAlarmeID;
+const timers = { preco: 0, taxas: 0, dolar: 0, alarmes: 0, silencio: 0, wsVigia: 0, wsReconexao: 0 };
 
-// Referência ao listener de teclado do campo de alerta (para remover antes de readicionar)
-let valorAlertaKeydownHandler = null;
+const el = id => document.getElementById(id);
 
-// ---------------------------------------------------------------------------
-// Inatividade
-// ---------------------------------------------------------------------------
+/** Elementos usados com frequência, capturados uma vez no carregamento. */
+let ui = null;
 
-function resetarInatividade() {
-	tempoInatividade = 0;
-	if (ativo) return;
-	document.getElementById('overlay').style.display = 'none';
-	ativo = true;
-	inicial();
-	atualiza_taxas();
-	clearInterval(intervaloID);
-	intervaloID = setInterval(inicial, UPDATE_TIME);
-	clearInterval(taxaIntervaloID);
-	taxaIntervaloID = setInterval(atualiza_taxas, UPDATE_TAXAS);
+function capturarElementos() {
+	ui = {
+		preco: el('info-price'),
+		usdt: el('info-usdt'),
+		dolar: el('info-dolar'),
+		percentual: el('info-percent'),
+		seta: el('info-seta'),
+		horario: el('info-time'),
+		maxima: el('highPrice'),
+		minima: el('lowPrice'),
+		maximaUSD: el('highPriceDol'),
+		minimaUSD: el('lowPriceDol'),
+		taxas: Object.fromEntries(CAMPOS_TAXA.map(campo => [campo, el(campo)])),
+		overlay: el('overlay'),
+		grafico: el('grafico'),
+		graficoModelo: el('grafico-modelo'),
+		modal: el('modalAlerta'),
+		darkback: el('darkback'),
+		campoValor: el('valorAlerta'),
+		corpoTabela: el('alertasTabela').tBodies[0],
+	};
 }
 
-function verificarInatividade() {
-	if (!ativo) return;
-	tempoInatividade++;
-	if (tempoLimite > 0 && tempoInatividade >= tempoLimite) {
-		document.getElementById('overlay').style.display = 'flex';
-		ativo = false;
-		clearTimeout(alarmesID);
-		clearInterval(intervaloID);
-		clearInterval(taxaIntervaloID);
-		liberarWakeLock();
+/** Só altera o DOM quando o texto muda (atribuir textContent sempre invalida o layout). */
+function definirTexto(elemento, texto) {
+	if (elemento.textContent !== texto) elemento.textContent = texto;
+}
+
+// ---------------------------------------------------------------------------
+// Rede
+// ---------------------------------------------------------------------------
+
+/** Sinal que aborta por timeout ou quando o monitoramento é pausado. */
+function sinalRequisicao() {
+	const limite = AbortSignal.timeout(TIMEOUT_REQUISICAO);
+	return typeof AbortSignal.any === 'function' ? AbortSignal.any([controleCiclo.signal, limite]) : limite;
+}
+
+async function buscarJSON(url) {
+	const resposta = await fetch(url, { signal: sinalRequisicao(), cache: 'no-store' });
+	if (!resposta.ok) throw new Error(`HTTP ${resposta.status} em ${url}`);
+	return resposta.json();
+}
+
+function paraNumero(valor, campo) {
+	const numero = parseFloat(valor);
+	if (!Number.isFinite(numero)) throw new Error(`Campo "${campo}" inválido: ${valor}`);
+	return numero;
+}
+
+function lerTicker(dados) {
+	return {
+		preco: paraNumero(dados.lastPrice, 'lastPrice'),
+		variacao: paraNumero(dados.priceChangePercent, 'priceChangePercent'),
+		maxima: paraNumero(dados.highPrice, 'highPrice'),
+		minima: paraNumero(dados.lowPrice, 'lowPrice'),
+	};
+}
+
+/** Lê o ticker de uma mensagem do WebSocket (campos c, P, h, l da Binance). */
+function lerTickerWs(dados) {
+	return {
+		preco: paraNumero(dados.c, 'c'),
+		variacao: paraNumero(dados.P, 'P'),
+		maxima: paraNumero(dados.h, 'h'),
+		minima: paraNumero(dados.l, 'l'),
+	};
+}
+
+/**
+ * Extrai um par da resposta da Binance. Um campo inválido afeta só aquele par.
+ * @returns {{ticker?: object, erro?: Error}}
+ */
+function extrairTicker(porSimbolo, simbolo, erroRede) {
+	if (erroRede) return { erro: erroRede };
+	const dados = porSimbolo.get(simbolo);
+	if (!dados) return { erro: new Error(`Par ${simbolo} ausente na resposta da Binance`) };
+	try {
+		return { ticker: lerTicker(dados) };
+	} catch (erro) {
+		return { erro };
 	}
 }
 
-// Registra os listeners de inatividade uma única vez no carregamento
-document.addEventListener('keydown', resetarInatividade);
-document.addEventListener('mousemove', resetarInatividade);
+// ---------------------------------------------------------------------------
+// Ciclos de atualização (cadeias de setTimeout: a próxima execução só é
+// agendada quando a atual termina, então requisições nunca se sobrepõem)
+// ---------------------------------------------------------------------------
+
+function cicloAtual(geracao) {
+	return ativo && geracao === geracaoCiclo;
+}
+
+function agendar(nome, funcao, minimo, variacao, geracao) {
+	clearTimeout(timers[nome]);
+	const espera = minimo + Math.floor(Math.random() * (variacao + 1));
+	const previsto = performance.now() + espera;
+	timers[nome] = setTimeout(() => {
+		// Atraso em relação ao previsto: revela timers estrangulados (ex.: janela minimizada).
+		Metricas.registrar(`atraso_timer:${nome}`, performance.now() - previsto, { comTempo: true });
+		funcao(geracao);
+	}, espera);
+}
+
+function iniciarCiclos() {
+	ativo = true;
+	const geracao = ++geracaoCiclo;
+	controleCiclo = new AbortController();
+	adquirirWakeLock();
+	cadeiaRestAtiva = true;
+	atualizarPrecos(geracao); // REST: 1º preço rápido
+	conectarWebSocket(geracao);
+	atualizarTaxas(geracao);
+	atualizarDolar(geracao);
+}
+
+function pararCiclos() {
+	ativo = false;
+	geracaoCiclo++;
+	controleCiclo.abort();
+	fecharWebSocket();
+	wsTentativas = 0;
+	cadeiaRestAtiva = false;
+	for (const nome of ['preco', 'taxas', 'dolar', 'alarmes', 'wsReconexao']) {
+		clearTimeout(timers[nome]);
+		timers[nome] = 0;
+	}
+	liberarWakeLock();
+}
+
+async function atualizarPrecos(geracao) {
+	const inicio = performance.now();
+	let porSimbolo = null;
+	let erroRede = null;
+	try {
+		const dados = await buscarJSON(URL_TICKERS);
+		if (!Array.isArray(dados)) throw new Error('Resposta da Binance não é uma lista');
+		porSimbolo = new Map(dados.map(item => [item?.symbol, item]));
+	} catch (erro) {
+		erroRede = erro;
+	}
+	if (!cicloAtual(geracao)) return; // pausado enquanto esperava a resposta
+	const fimRede = performance.now();
+	Metricas.registrar('espera:precos', fimRede - inicio);
+	Metricas.marcar('primeira_resposta_binance');
+	if (erroRede) Metricas.contar('falha:binance');
+	processarPrecos(geracao, porSimbolo, erroRede);
+	Metricas.registrar('processamento:precos', performance.now() - fimRede);
+}
+
+function processarPrecos(geracao, porSimbolo, erroRede) {
+	// O WebSocket assumiu enquanto esta consulta estava em andamento: os dados dele são mais novos.
+	if (wsSaudavel) {
+		cadeiaRestAtiva = false;
+		return;
+	}
+	const brl = extrairTicker(porSimbolo, SIMBOLO_BRL, erroRede);
+	const usd = extrairTicker(porSimbolo, SIMBOLO_USDT, erroRede);
+
+	if (brl.ticker) Metricas.medir('render:brl', () => aplicarBRL(brl.ticker));
+	else registrarFalhaBRL(brl.erro);
+	if (usd.ticker) aplicarUSD(usd.ticker);
+	else registrarFalhaUSD(usd.erro);
+	depoisDeAtualizarPrecos(geracao, { ...(brl.ticker && { brl: brl.ticker }), ...(usd.ticker && { usdt: usd.ticker }) });
+
+	if (falhasBRL >= MAX_FALHAS) {
+		console.warn(`${MAX_FALHAS} falhas consecutivas: pausando monitoramento.`);
+		pausar(true);
+		return;
+	}
+	agendar('preco', atualizarPrecos, PRECO_INTERVALO_MIN, PRECO_INTERVALO_VARIACAO, geracao);
+}
+
+function aplicarBRL(ticker) {
+	falhasBRL = 0;
+	ultimoPrecoBRL = ticker.preco;
+	exibirBRL(ticker);
+}
+
+function aplicarUSD(ticker) {
+	falhasUSD = 0;
+	ultimoPrecoUSD = ticker.preco;
+	exibirUSD(ticker);
+}
+
+function registrarFalhaBRL(erro) {
+	console.error('Erro ao buscar BTC/BRL na Binance:', erro);
+	Metricas.contar('falha:brl');
+	falhasBRL++;
+	// Mantém o último preço na tela por alguns ciclos (inclusive o do estado salvo).
+	if (falhasBRL >= CICLOS_ANTES_SEM_DADOS || (!Number.isFinite(ultimoPrecoBRL) && !exibindoEstadoSalvo)) {
+		ultimoPrecoBRL = NaN;
+		exibirSemDadosBRL();
+	}
+}
+
+function registrarFalhaUSD(erro) {
+	console.error('Erro ao buscar BTC/USDT na Binance:', erro);
+	Metricas.contar('falha:usdt');
+	falhasUSD++;
+	if (falhasUSD >= CICLOS_ANTES_SEM_DADOS || (!Number.isFinite(ultimoPrecoUSD) && !exibindoEstadoSalvo)) {
+		ultimoPrecoUSD = NaN;
+		exibirSemDadosUSD();
+	}
+}
+
+/** Passos comuns após qualquer atualização de preço (REST ou WebSocket). */
+function depoisDeAtualizarPrecos(geracao, parteEstado) {
+	exibirDolar();
+	if (Object.keys(parteEstado).length) atualizarEstado(parteEstado);
+	concluirCarregamento(); // antes de agendar os alarmes: o silêncio inicial já vale
+	agendarChecagemAlarmes(geracao);
+}
+
+/** Checa os alarmes logo depois da atualização. Não reinicia um prazo pendente:
+ *  pelo WebSocket chegam mensagens a cada ~1 s e o prazo nunca venceria. */
+function agendarChecagemAlarmes(geracao) {
+	if (timers.alarmes) return;
+	timers.alarmes = setTimeout(() => {
+		timers.alarmes = 0;
+		if (cicloAtual(geracao)) checarAlarmes();
+	}, ATRASO_CHECAGEM_ALARMES);
+}
 
 // ---------------------------------------------------------------------------
-// WakeLock — wrapper seguro
+// WebSocket da Binance
+//
+// Depois do 1º BTC/BRL, o polling REST fica parado. Se a conexão fechar ou ficar
+// WS_LIMITE_SILENCIO sem nenhuma mensagem (BRL ou USDT), o REST volta na hora e o app
+// tenta reconectar com espera crescente (1 s, 2 s, 4 s... até 60 s, com variação
+// aleatória). Pausar fecha a conexão; retomar abre de novo.
+// ---------------------------------------------------------------------------
+
+function conectarWebSocket(geracao) {
+	if (!cicloAtual(geracao) || typeof WebSocket !== 'function') return;
+	fecharWebSocket();
+	Metricas.contar('ws:conexoes');
+	let socket;
+	try {
+		socket = new WebSocket(URL_WS_TICKERS);
+	} catch (erro) {
+		console.warn('Não foi possível abrir o WebSocket da Binance:', erro);
+		agendarReconexao(geracao);
+		return;
+	}
+	ws = socket;
+	const inicio = performance.now();
+	socket.addEventListener('open', () => {
+		if (ws !== socket) return;
+		Metricas.registrar('ws:conexao', performance.now() - inicio);
+		Metricas.marcar('ws_conectado');
+		rearmarVigia(geracao); // aberto mas mudo também conta como perdido
+	});
+	socket.addEventListener('message', evento => {
+		if (ws === socket && cicloAtual(geracao)) aoReceberMensagemWs(evento.data, geracao);
+	});
+	// "error" é sempre seguido de "close".
+	socket.addEventListener('close', () => {
+		if (ws === socket) perderWebSocket(geracao, 'fechado');
+	});
+}
+
+function fecharWebSocket() {
+	const socket = ws;
+	ws = null;
+	wsSaudavel = false;
+	clearTimeout(timers.wsVigia);
+	timers.wsVigia = 0;
+	if (socket && socket.readyState <= WebSocket.OPEN) socket.close();
+}
+
+/** A conexão caiu ou ficou muda: volta ao REST e agenda uma nova tentativa. */
+function perderWebSocket(geracao, motivo) {
+	fecharWebSocket();
+	Metricas.contar(`ws:queda:${motivo}`);
+	Metricas.evento('ws', { estado: motivo });
+	if (!cicloAtual(geracao)) return;
+	if (!cadeiaRestAtiva) {
+		cadeiaRestAtiva = true;
+		atualizarPrecos(geracao);
+	}
+	agendarReconexao(geracao);
+}
+
+function agendarReconexao(geracao) {
+	const base = Math.min(WS_RECONEXAO_MAX, WS_RECONEXAO_MIN * 2 ** wsTentativas);
+	const espera = Math.round(base * (0.5 + Math.random() / 2)); // variação para não sincronizar
+	wsTentativas++;
+	clearTimeout(timers.wsReconexao);
+	timers.wsReconexao = setTimeout(() => {
+		timers.wsReconexao = 0;
+		conectarWebSocket(geracao);
+	}, espera);
+}
+
+function rearmarVigia(geracao) {
+	clearTimeout(timers.wsVigia);
+	timers.wsVigia = setTimeout(() => perderWebSocket(geracao, 'silencio'), WS_LIMITE_SILENCIO);
+}
+
+function aoReceberMensagemWs(texto, geracao) {
+	let dados;
+	let ticker;
+	try {
+		dados = JSON.parse(texto).data;
+		ticker = lerTickerWs(dados);
+	} catch (erro) {
+		Metricas.contar('ws:mensagem_invalida');
+		console.warn('Mensagem inválida do WebSocket:', erro);
+		return;
+	}
+	const inicio = performance.now();
+	Metricas.contar('ws:mensagens');
+	if (Number.isFinite(dados.E)) Metricas.registrar('ws:idade_evento', Date.now() - dados.E); // inclui diferença de relógio
+
+	if (dados.s !== SIMBOLO_BRL && dados.s !== SIMBOLO_USDT) return;
+	// Qualquer par mantém a conexão viva: o BTC/BRL tem pouca negociação e a Binance só
+	// envia o ticker quando algo muda (silêncios de 5 a 16 s são normais). O BTC/USDT
+	// chega a cada ~1 s; se os dois calarem por WS_LIMITE_SILENCIO, a conexão caiu.
+	rearmarVigia(geracao);
+	wsTentativas = 0;
+
+	if (dados.s === SIMBOLO_BRL) {
+		if (ultimaMensagemBRL) Metricas.registrar('ws:intervalo_brl', inicio - ultimaMensagemBRL);
+		ultimaMensagemBRL = inicio;
+		// O polling REST só para quando chega o 1º BTC/BRL (é ele que dispara os alarmes).
+		if (!wsSaudavel) {
+			wsSaudavel = true;
+			Metricas.marcar('ws_primeiro_preco');
+			Metricas.evento('ws', { estado: 'recebendo' });
+			clearTimeout(timers.preco); // o polling REST para; a consulta em andamento é descartada
+			timers.preco = 0;
+			cadeiaRestAtiva = false;
+		}
+		Metricas.medir('render:brl', () => aplicarBRL(ticker));
+		depoisDeAtualizarPrecos(geracao, { brl: ticker });
+	} else {
+		aplicarUSD(ticker);
+		depoisDeAtualizarPrecos(geracao, { usdt: ticker });
+	}
+	Metricas.registrar('processamento:ws', performance.now() - inicio);
+}
+
+async function atualizarDolar(geracao) {
+	const inicio = performance.now();
+	let cotacao = NaN;
+	let falha = null;
+	try {
+		const dados = await buscarJSON(URL_USD_BRL);
+		const compra = paraNumero(dados.USDBRL?.bid, 'USDBRL.bid');
+		const venda = paraNumero(dados.USDBRL?.ask, 'USDBRL.ask');
+		cotacao = (compra + venda) / 2;
+	} catch (erro) {
+		falha = erro;
+	}
+	if (!cicloAtual(geracao)) return;
+	Metricas.registrar('ciclo:dolar', performance.now() - inicio);
+	if (falha) {
+		console.error('Erro ao buscar USD/BRL na AwesomeAPI:', falha);
+		Metricas.contar('falha:dolar');
+	} else {
+		atualizarEstado({ dolar: cotacao });
+	}
+	ultimaCotacaoDolar = cotacao;
+	exibirDolar();
+	agendar('dolar', atualizarDolar, DOLAR_INTERVALO_MIN, DOLAR_INTERVALO_VARIACAO, geracao);
+}
+
+async function atualizarTaxas(geracao) {
+	const inicio = performance.now();
+	let valores = null;
+	let falha = null;
+	try {
+		const dados = await buscarJSON(URL_TAXAS);
+		// Valida todos os campos antes de escrever: nunca deixa a tela meio atualizada.
+		valores = CAMPOS_TAXA.map(campo => paraNumero(dados[campo], campo));
+	} catch (erro) {
+		falha = erro;
+	}
+	if (!cicloAtual(geracao)) return;
+	Metricas.registrar('ciclo:taxas', performance.now() - inicio);
+	if (falha) {
+		console.error('Erro ao buscar taxas na mempool.space:', falha);
+		Metricas.contar('falha:taxas');
+	} else {
+		CAMPOS_TAXA.forEach((campo, indice) => {
+			definirTexto(ui.taxas[campo], `${formatoTaxa.format(valores[indice])} sat/vB`);
+		});
+		atualizarEstado({ taxas: Object.fromEntries(CAMPOS_TAXA.map((campo, indice) => [campo, valores[indice]])) });
+	}
+	agendar('taxas', atualizarTaxas, TAXAS_INTERVALO_MIN, TAXAS_INTERVALO_VARIACAO, geracao);
+}
+
+// ---------------------------------------------------------------------------
+// Exibição
+// ---------------------------------------------------------------------------
+
+function exibirBRL({ preco, variacao, maxima, minima }) {
+	const precoFormatado = formatoBRL.format(preco);
+	const variacaoFormatada = `${variacao.toFixed(2)}%`;
+	const agora = new Date();
+
+	// No app o título nativo não acompanha o document.title (sempre "BTC Status").
+	if (!isPyWebView) document.title = `${precoFormatado} | ${variacaoFormatada}`;
+	sairDoEstadoSalvo();
+	definirTexto(ui.preco, precoFormatado);
+	definirTexto(ui.maxima, formatoBRL.format(maxima));
+	definirTexto(ui.minima, formatoBRL.format(minima));
+	definirTexto(ui.horario, `${formatoData.format(agora)} - ${formatoHora.format(agora)}`);
+	definirTexto(ui.percentual, variacaoFormatada);
+
+	// A seta mostra a direção da última MUDANÇA de preço: com o WebSocket chegam
+	// atualizações a cada ~1 s e o preço muitas vezes se repete; nesse caso a seta fica.
+	const direcao = direcaoPreco(precoAnterior, preco);
+	precoAnterior = preco;
+	if (direcao === 0 && ui.seta.textContent !== '') return;
+	ui.seta.classList.toggle('seta-neutra', direcao === 0);
+	ui.seta.textContent = SETA_POR_DIRECAO[direcao];
+	ui.seta.animate(ANIMACAO_SETA, DURACAO_ANIMACAO_SETA);
+}
+
+function exibirSemDadosBRL() {
+	if (!isPyWebView) document.title = 'Sem Dados';
+	sairDoEstadoSalvo();
+	definirTexto(ui.preco, '▶Sem Dados◀');
+	definirTexto(ui.maxima, SEM_VALOR);
+	definirTexto(ui.minima, SEM_VALOR);
+	definirTexto(ui.percentual, SEM_VALOR);
+	ui.seta.textContent = '';
+	precoAnterior = NaN; // ao voltar, a seta recomeça neutra
+}
+
+function exibirUSD({ preco, maxima, minima }) {
+	definirTexto(ui.usdt, formatoUSD.format(preco));
+	definirTexto(ui.maximaUSD, formatoUSD.format(maxima));
+	definirTexto(ui.minimaUSD, formatoUSD.format(minima));
+}
+
+function exibirSemDadosUSD() {
+	definirTexto(ui.usdt, 'Sem Dados');
+	definirTexto(ui.maximaUSD, SEM_VALOR);
+	definirTexto(ui.minimaUSD, SEM_VALOR);
+}
+
+/** Mostra "dólar implícito (BTC/BRL ÷ BTC/USDT) | dólar comercial". */
+function exibirDolar() {
+	const formatar = valor => (Number.isFinite(valor) ? formatoBRL.format(valor) : 'Sem Dados');
+	definirTexto(ui.dolar, `${formatar(ultimoPrecoBRL / ultimoPrecoUSD)} | ${formatar(ultimaCotacaoDolar)}`);
+}
+
+/** Esconde a tela de carregamento (ao exibir o estado salvo ou a 1ª resposta de preço). */
+function mostrarConteudo() {
+	if (conteudoVisivel) return;
+	conteudoVisivel = true;
+	el('tela-carregamento').style.display = 'none';
+	el('conteudo').style.display = 'block';
+	Metricas.marcar('conteudo_visivel');
+}
+
+// ---------------------------------------------------------------------------
+// Último estado salvo
+//
+// Ao abrir, a tela mostra os últimos valores recebidos (esmaecidos, com o horário
+// em que foram salvos) até chegarem dados novos. Eles NUNCA entram nos alarmes:
+// só os campos de texto são preenchidos; ultimoPrecoBRL continua NaN.
+// No app, depende do perfil persistente do WebView2 (localStorage entre execuções).
+// ---------------------------------------------------------------------------
+
+function restaurarEstadoSalvo() {
+	let estado;
+	try {
+		estado = validarEstadoSalvo(JSON.parse(localStorage.getItem(CHAVE_ESTADO) ?? 'null'));
+	} catch (erro) {
+		console.warn('Último estado salvo inválido:', erro);
+		return;
+	}
+	if (!estado) return;
+	estadoAtual = estado; // base para as próximas gravações
+	Metricas.medir('render:estado_salvo', () => exibirEstadoSalvo(estado));
+	Metricas.marcar('estado_restaurado');
+	mostrarConteudo();
+}
+
+function exibirEstadoSalvo({ salvoEm, brl, usdt, dolar, taxas }) {
+	exibindoEstadoSalvo = true;
+	const formatar = valor => (Number.isFinite(valor) ? formatoBRL.format(valor) : 'Sem Dados');
+	const salvo = new Date(salvoEm);
+
+	if (!isPyWebView) document.title = `${formatoBRL.format(brl.preco)} (salvo)`;
+	definirTexto(ui.preco, formatoBRL.format(brl.preco));
+	definirTexto(ui.maxima, formatoBRL.format(brl.maxima));
+	definirTexto(ui.minima, formatoBRL.format(brl.minima));
+	definirTexto(ui.percentual, `${brl.variacao.toFixed(2)}%`);
+	ui.seta.textContent = '';
+	definirTexto(ui.horario, `atualizando… (salvo em ${formatoData.format(salvo)} - ${formatoHora.format(salvo)})`);
+	if (usdt) exibirUSD(usdt);
+	definirTexto(ui.dolar, `${formatar(usdt ? brl.preco / usdt.preco : NaN)} | ${formatar(dolar ?? NaN)}`);
+	// O dólar comercial salvo vale até a 1ª resposta da AwesomeAPI (só exibição).
+	if (dolar !== null) ultimaCotacaoDolar = dolar;
+	if (taxas) {
+		for (const campo of CAMPOS_TAXA) definirTexto(ui.taxas[campo], `${formatoTaxa.format(taxas[campo])} sat/vB`);
+	}
+	for (const elemento of [ui.preco, ui.horario]) elemento.classList.add('desatualizado');
+}
+
+/** Chamado quando chega dado novo de BRL (ou quando ele falha de vez). */
+function sairDoEstadoSalvo() {
+	if (!exibindoEstadoSalvo) return;
+	exibindoEstadoSalvo = false;
+	for (const elemento of [ui.preco, ui.horario]) elemento.classList.remove('desatualizado');
+}
+
+/** Junta dados novos ao estado e grava (no máximo a cada INTERVALO_SALVAR_ESTADO). */
+function atualizarEstado(parte) {
+	estadoAtual = { ...(estadoAtual ?? {}), ...parte, versao: VERSAO_ESTADO };
+	if (parte.brl) estadoAtual.salvoEm = Date.now();
+	gravarEstado(false);
+}
+
+function gravarEstado(forcar) {
+	if (!estadoAtual?.brl || !Number.isFinite(estadoAtual.salvoEm)) return;
+	const agora = Date.now();
+	if (!forcar && agora - ultimaGravacaoEstado < INTERVALO_SALVAR_ESTADO) return;
+	ultimaGravacaoEstado = agora;
+	try {
+		localStorage.setItem(CHAVE_ESTADO, JSON.stringify(estadoAtual));
+	} catch (erro) {
+		console.warn('Não foi possível gravar o último estado:', erro);
+	}
+}
+
+/** Fim do carregamento: chegou a 1ª resposta de preço (com ou sem sucesso). */
+function concluirCarregamento() {
+	if (carregado) return;
+	carregado = true;
+	mostrarConteudo();
+	silenciarAlarmes(SILENCIO_APOS_CARREGAR); // evita disparo imediato ao abrir
+	Metricas.marcar('primeiro_preco');
+	enviarRelatorioAbertura(); // se o gráfico já carregou, o relatório sai agora
+	setTimeout(() => enviarRelatorioAbertura(true), ESPERA_MAX_RELATORIO_ABERTURA);
+	setInterval(() => enviarMetricas('periodico'), INTERVALO_RELATORIO_METRICAS);
+}
+
+// ---------------------------------------------------------------------------
+// Métricas: envio dos relatórios ao Python (ver metricas.js)
+// ---------------------------------------------------------------------------
+
+let relatorioAberturaEnviado = false;
+
+/** Envia o relatório do período. Fora do app, só mostra no console. */
+async function enviarMetricas(motivo) {
+	if (!Metricas.ATIVAS) return;
+	const relatorio = Metricas.relatorio(motivo);
+	if (isPyWebView) await chamarApi('registrar_metricas', relatorio);
+	else console.info(`[métricas] ${motivo}`, relatorio);
+}
+
+/** O relatório da abertura sai quando o gráfico carrega ou, no máximo, 15 s após o 1º preço. */
+function enviarRelatorioAbertura(forcar = false) {
+	if (relatorioAberturaEnviado || !carregado) return;
+	if (!forcar && !('grafico_carregado' in Metricas.marcos)) return;
+	relatorioAberturaEnviado = true;
+	enviarMetricas('abertura');
+}
+
+// ---------------------------------------------------------------------------
+// Gráfico (widget do TradingView)
+// ---------------------------------------------------------------------------
+
+/**
+ * O widget só existe enquanto está visível e o monitoramento está ativo.
+ * Ocultar ou pausar remove o iframe (para CPU, memória e rede); exibir clona de
+ * novo o <template>, e o script do TradingView recria o gráfico.
+ */
+function atualizarGrafico() {
+	const mostrar = graficoVisivel && ativo;
+	ui.grafico.style.display = mostrar ? 'flex' : 'none';
+	if (!mostrar) {
+		observadorGrafico?.disconnect();
+		ui.grafico.replaceChildren();
+	} else if (!ui.grafico.firstElementChild) {
+		const inicio = performance.now();
+		Metricas.contar('grafico:montagens');
+		observarCargaGrafico(inicio);
+		Metricas.medir('grafico:montar', () => ui.grafico.append(document.importNode(ui.graficoModelo.content, true)));
+	}
+}
+
+let observadorGrafico = null;
+
+/** Mede da montagem até o "load" do iframe criado pelo script do TradingView. */
+function observarCargaGrafico(inicio) {
+	observadorGrafico?.disconnect();
+	observadorGrafico = new MutationObserver(() => {
+		const iframe = ui.grafico.querySelector('iframe');
+		if (!iframe) return;
+		observadorGrafico.disconnect();
+		iframe.addEventListener('load', () => {
+			Metricas.registrar('grafico:montagem_ate_carga', performance.now() - inicio);
+			Metricas.marcar('grafico_carregado');
+			enviarRelatorioAbertura();
+		}, { once: true });
+	});
+	observadorGrafico.observe(ui.grafico, { childList: true, subtree: true });
+}
+
+function alternarGrafico() {
+	graficoVisivel = !graficoVisivel;
+	atualizarGrafico();
+}
+
+// ---------------------------------------------------------------------------
+// Pausa, retomada e inatividade
+// ---------------------------------------------------------------------------
+
+function pausar(manual) {
+	if (!ativo) return;
+	pausaManual = manual;
+	Metricas.evento('pausa', { manual });
+	pararCiclos();
+	ui.overlay.style.display = 'flex';
+	atualizarBotaoPausa();
+	atualizarGrafico();
+}
+
+function retomar({ silenciar }) {
+	if (ativo) return;
+	pausaManual = false;
+	Metricas.evento('retomada', { silenciar });
+	falhasBRL = 0;
+	falhasUSD = 0;
+	ultimaInteracao = Date.now();
+	ui.overlay.style.display = 'none';
+	iniciarCiclos();
+	if (silenciar) silenciarAlarmes();
+	atualizarBotaoPausa();
+	atualizarGrafico();
+}
+
+function pararIniciar() {
+	if (ativo) pausar(true);
+	else retomar({ silenciar: true });
+}
+
+function atualizarBotaoPausa() {
+	const rotulo = ativo ? 'Pausar' : 'Retomar';
+	const botao = el('pausar-btn');
+	botao.title = rotulo;
+	botao.setAttribute('aria-label', rotulo);
+}
+
+function registrarInteracao() {
+	ultimaInteracao = Date.now();
+	if (!ativo && !pausaManual) retomar({ silenciar: false });
+}
+
+function verificarInatividade() {
+	if (!ativo || !monitorarInatividade) return;
+	// Com algum alerta ativo, nunca pausa: é com o usuário longe que o alerta mais importa.
+	if (existeAlertaAtivo(alertas)) return;
+	if (Date.now() - ultimaInteracao >= LIMITE_INATIVIDADE) pausar(false);
+}
+
+// ---------------------------------------------------------------------------
+// WakeLock (impede o desligamento da tela enquanto monitora)
 // ---------------------------------------------------------------------------
 
 async function adquirirWakeLock() {
+	if (!('wakeLock' in navigator) || wakeLock || pedindoWakeLock || document.visibilityState !== 'visible') return;
+	pedindoWakeLock = true;
 	try {
-		wakeLock = await navigator.wakeLock.request('screen');
-	} catch (err) {
-		console.warn('WakeLock não disponível:', err);
-		wakeLock = null;
+		const sentinela = await navigator.wakeLock.request('screen');
+		if (!ativo) {
+			sentinela.release().catch(() => {});
+			return;
+		}
+		wakeLock = sentinela;
+		sentinela.addEventListener('release', () => {
+			if (wakeLock === sentinela) wakeLock = null;
+		});
+	} catch (erro) {
+		console.warn('WakeLock não disponível:', erro);
+	} finally {
+		pedindoWakeLock = false;
 	}
 }
 
 function liberarWakeLock() {
-	if (wakeLock) {
-		wakeLock.release().catch(err => console.warn('Erro ao liberar wakeLock:', err));
-		wakeLock = null;
+	const sentinela = wakeLock;
+	wakeLock = null;
+	if (sentinela) sentinela.release().catch(erro => console.warn('Erro ao liberar WakeLock:', erro));
+}
+
+// ---------------------------------------------------------------------------
+// Ponte com o Python (pywebview)
+// ---------------------------------------------------------------------------
+
+let apiPython = null;
+
+// A API só fica disponível depois do evento "pywebviewready".
+const apiPronta = new Promise(resolve => {
+	if (!isPyWebView) return;
+	const pronta = () => {
+		Metricas.marcar('api_python_pronta');
+		apiPython = window.pywebview.api;
+		resolve(apiPython);
+	};
+	if (typeof window.pywebview?.api?.carregar_alerta === 'function') pronta();
+	else window.addEventListener('pywebviewready', pronta, { once: true });
+});
+
+/** Espera a API (até TIMEOUT_API_PYTHON) só enquanto ela ainda não está pronta. */
+async function obterApi() {
+	if (apiPython) return apiPython;
+	let timer = 0;
+	const limite = new Promise((_, rejeitar) => {
+		timer = setTimeout(() => rejeitar(new Error('API pywebview indisponível')), TIMEOUT_API_PYTHON);
+	});
+	try {
+		return await Promise.race([apiPronta, limite]);
+	} finally {
+		clearTimeout(timer);
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Transição de alarme (silencia alarmes temporariamente)
-// ---------------------------------------------------------------------------
-
-function fazerTransicaoAlarme(tempoTransicao = 15000) {
-	transicaoAlarme = 1;
-	clearTimeout(transicaoAlarmeID);
-	transicaoAlarmeID = setTimeout(() => {
-		transicaoAlarme = 0;
-	}, tempoTransicao);
-}
-
-// ---------------------------------------------------------------------------
-// Integração PyWebView
-// ---------------------------------------------------------------------------
-
-function pyWebviewFechar() {
-	window.pywebview.api.fechar();
-}
-
-function pyWebviewMinimize() {
-	window.pywebview.api.minimizar();
-}
-
-function pyWebviewCentralizar() {
-	// Passa booleano verdadeiro; o Python recebe como truthy corretamente
-	window.pywebview.api.centralizar(true);
-}
-
-function pyWebviewSalvarAlerta(json) {
-	window.pywebview.api.salvar_alerta(json);
-}
-
-async function pyWebviewCarregarAlerta() {
+/** Chama um método Python. Retorna undefined fora do pywebview ou em caso de erro (nunca rejeita). */
+async function chamarApi(metodo, ...argumentos) {
+	if (!isPyWebView) return undefined;
+	const inicio = performance.now();
 	try {
-		return await window.pywebview.api.carregar_alerta();
+		const api = await obterApi();
+		return await api[metodo](...argumentos);
 	} catch (erro) {
-		console.error("Erro ao carregar alertas:", erro);
-		return [];
+		Metricas.contar(`falha:python:${metodo}`);
+		console.error(`Erro na chamada Python "${metodo}":`, erro);
+		return undefined;
+	} finally {
+		// Ida e volta pela ponte do pywebview (inclui o tempo do método no Python).
+		Metricas.registrar(`python:${metodo}`, performance.now() - inicio);
 	}
 }
 
@@ -144,602 +864,409 @@ async function pyWebviewCarregarAlerta() {
 // Controles da janela
 // ---------------------------------------------------------------------------
 
-function reiniciar() {
-	const fixarBtn = document.getElementById('fixar-btn');
-	if (fixarBtn.textContent === '▽') {
-		fixarBtn.textContent = '△'; // corrigido: era == (comparação) em vez de = (atribuição)
-		window.pywebview.api.fixarTopo();
-	}
+async function reiniciar() {
+	gravarEstado(true);
+	await enviarMetricas('recarga');
+	if (fixado) await chamarApi('definir_topo', false);
 	location.reload();
 }
 
-function pararIniciar() {
-	if (ativo) {
-		ativo = false;
-		document.getElementById('overlay').style.display = 'flex';
-		clearTimeout(alarmesID);
-		clearInterval(intervaloID);
-		clearInterval(taxaIntervaloID);
-		liberarWakeLock();
-		document.removeEventListener('keydown', resetarInatividade);
-		document.removeEventListener('mousemove', resetarInatividade);
-		alternarBtnPausa();
-	} else {
-		ativo = true;
-		falhasConsecutivas = 0;
-		document.getElementById('overlay').style.display = 'none';
-		inicial();
-		clearInterval(intervaloID);
-		intervaloID = setInterval(inicial, UPDATE_TIME);
-		atualiza_taxas();
-		clearInterval(taxaIntervaloID);
-		taxaIntervaloID = setInterval(atualiza_taxas, UPDATE_TAXAS);
-		document.addEventListener('keydown', resetarInatividade);
-		document.addEventListener('mousemove', resetarInatividade);
-		fazerTransicaoAlarme();
-		alternarBtnPausa();
-	}
+async function alternarFixar() {
+	const estado = await chamarApi('definir_topo', !fixado);
+	if (typeof estado === 'boolean') aplicarEstadoFixado(estado);
 }
 
-function alternarBtnPausa() {
-	const btn = document.getElementById("pausar-btn");
-	btn.setAttribute("title", btn.getAttribute("title") === "Pausar" ? "Reiniciar" : "Pausar");
+async function sincronizarEstadoTopo() {
+	const estado = await chamarApi('esta_no_topo');
+	if (typeof estado === 'boolean') aplicarEstadoFixado(estado);
 }
 
-function pyWebviewFixar() {
-	const btn = document.getElementById('fixar-btn');
-	if (btn.textContent === '△') {
-		tempoLimite = 0;
-		btn.setAttribute('title', 'Desafixar');
-		btn.setAttribute('alt', 'Desafixar');
-		btn.textContent = '▽';
-	} else {
-		tempoLimite = 1000;
-		btn.setAttribute('title', 'Fixar');
-		btn.setAttribute('alt', 'Fixar');
-		btn.textContent = '△';
-	}
-	window.pywebview.api.fixarTopo();
+function aplicarEstadoFixado(estado) {
+	fixado = estado;
+	monitorarInatividade = !estado;
+	ultimaInteracao = Date.now();
+	const botao = el('fixar-btn');
+	const rotulo = estado ? 'Desafixar' : 'Fixar no topo';
+	botao.textContent = estado ? '▽' : '△';
+	botao.title = rotulo;
+	botao.setAttribute('aria-label', rotulo);
 }
 
-function botoesPywebview() {
+function configurarBotoesJanela() {
 	if (isPyWebView) {
-		["reload-btn", "centralizar-btn", "fixar-btn", "alerta-btn",
-		 "minimize-btn", "close-btn", "pausar-btn", "grafico-btn"].forEach(id => {
-			document.getElementById(id).style.display = "flex";
-		});
-	} else {
-		const pausarBtn = document.getElementById("pausar-btn");
-		pausarBtn.style.left = "unset";
-		pausarBtn.style.right = "0px";
-		pausarBtn.style.display = "flex";
-		const alertaBtn = document.getElementById("alerta-btn");
-		alertaBtn.style.left = "0px";
-		alertaBtn.style.display = "flex";
-	}
-}
-
-function graficoAlternar() {
-	const grafico = document.getElementById("grafico");
-	// Usa getComputedStyle para ler o valor real do CSS na primeira chamada,
-	// quando style.display ainda é string vazia (nenhum valor inline definido).
-	const displayAtual = grafico.style.display || getComputedStyle(grafico).display;
-	grafico.style.display = displayAtual === "flex" ? "none" : "flex";
-}
-
-// ---------------------------------------------------------------------------
-// Atualização de preços
-// ---------------------------------------------------------------------------
-
-async function inicial() {
-	if (!ativo) return;
-
-	await adquirirWakeLock();
-
-	try {
-		const responseBRL = await fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCBRL');
-		const dataBRL = await responseBRL.json();
-
-		lastPriceBRL = parseFloat(dataBRL.lastPrice);
-		falhasConsecutivas = 0; // Requisição bem-sucedida — reseta contador de falhas
-
-		const formattedPriceBRL = lastPriceBRL.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
-		const priceChangePercent = parseFloat(dataBRL.priceChangePercent);
-
-		// Calcular direção da variação e mostrar seta correspondente
-		if (varSetaOld !== undefined) {
-			if (varSetaOld > priceChangePercent) {
-				varSetaMostrar = "\u00A0\u00A0↓";
-			} else if (varSetaOld < priceChangePercent) {
-				varSetaMostrar = "\u00A0\u00A0↑";
-			} else {
-				varSetaMostrar = "↔";
-			}
-		} else {
-			varSetaMostrar = "↔";
-		}
-		varSetaOld = priceChangePercent;
-
-		const formattedPercent = priceChangePercent.toFixed(2) + '%';
-
-		// Formatar data e hora com Intl.DateTimeFormat
-		const now = new Date();
-		const formattedTime =
-			new Intl.DateTimeFormat('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit' }).format(now) +
-			" - " +
-			new Intl.DateTimeFormat('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(now);
-
-		document.title = `${formattedPriceBRL} | ${formattedPercent}`;
-
-		document.getElementById('highPrice').textContent = parseFloat(dataBRL.highPrice).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
-		document.getElementById('lowPrice').textContent = parseFloat(dataBRL.lowPrice).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
-		document.getElementById('info-price').textContent = formattedPriceBRL;
-		document.getElementById('info-time').textContent = formattedTime;
-
-		if (ativo) {
-			document.getElementById('info-percent').textContent = formattedPercent;
-			const setaLimpa = varSetaMostrar.replaceAll('\u00A0', '');
-			document.getElementById('info-seta').style.color = setaLimpa === '↔' ? 'white' : '#f7931a';
-			// Reinicia a animação da seta
-			const setaEl = document.getElementById('info-seta');
-			setaEl.style.opacity = '0';
-			setaEl.style.animation = 'none';
-			setaEl.offsetHeight; // força reflow para reiniciar animação CSS
-			setaEl.style.animation = 'surgindo 1s forwards';
-			setaEl.textContent = varSetaMostrar;
-		}
-
-		atualiza_USD(lastPriceBRL);
-
-	} catch (error) {
-		console.error('Erro ao buscar dados da API BTC/BRL Binance:', error);
-		document.title = 'Sem Dados';
-		document.getElementById('info-price').textContent = '▶Sem Dados◀';
-
-		// Lógica de falhas consecutivas: pausa o monitoramento após MAX_FALHAS tentativas
-		falhasConsecutivas++;
-		if (falhasConsecutivas >= MAX_FALHAS) {
-			console.warn(`${MAX_FALHAS} falhas consecutivas — pausando monitoramento.`);
-			pararIniciar();
-			return;
-		}
-	}
-
-	// Reagendar com intervalo aleatório para evitar picos sincronizados de requisição
-	const proximoIntervalo = Math.floor(Math.random() * 3001 + UPDATE_TIME);
-	clearInterval(intervaloID);
-	intervaloID = setInterval(inicial, proximoIntervalo);
-
-	clearTimeout(alarmesID);
-	alarmesID = setTimeout(checarAlarmes, 1000);
-}
-
-async function atualiza_B3(dollarExchangeRate) {
-	try {
-		const responseBRLx = await fetch('https://economia.awesomeapi.com.br/json/last/USD-BRL');
-		const dataBRLx = await responseBRLx.json();
-		const lastPriceBRLaskx = parseFloat(dataBRLx.USDBRL.ask);
-		const lastPriceBRLbidx = parseFloat(dataBRLx.USDBRL.bid);
-		const lastPriceBRLx = (lastPriceBRLaskx + lastPriceBRLbidx) / 2;
-		const formattedPriceBRLx = lastPriceBRLx.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
-		document.getElementById('info-dolar').textContent = `${dollarExchangeRate} | ${formattedPriceBRLx}`;
-	} catch (error) {
-		console.error('Erro ao buscar dados do BRL/USDT AwesomeAPI:', error);
-		document.getElementById('info-dolar').textContent = 'Sem Dados';
-	}
-}
-
-async function atualiza_USD(priceBRL) {
-	try {
-		const responseUSD = await fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT');
-		const dataUSD = await responseUSD.json();
-		const lastPriceUSD = parseFloat(dataUSD.lastPrice);
-		const formattedPriceUSD = lastPriceUSD.toLocaleString('pt-BR', { style: 'currency', currency: 'USD' });
-
-		document.getElementById('info-usdt').textContent = formattedPriceUSD;
-
-		const dollarExchangeRate = (priceBRL / lastPriceUSD).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
-
-		document.getElementById('highPriceDol').textContent = parseFloat(dataUSD.highPrice).toLocaleString('pt-BR', { style: 'currency', currency: 'USD' });
-		document.getElementById('lowPriceDol').textContent = parseFloat(dataUSD.lowPrice).toLocaleString('pt-BR', { style: 'currency', currency: 'USD' });
-
-		atualiza_B3(dollarExchangeRate);
-	} catch (error) {
-		console.error('Erro ao buscar dados do BTC/USDT Binance:', error);
-		document.getElementById('info-usdt').textContent = 'Sem Dados';
-		document.getElementById('info-dolar').textContent = 'Sem Dados';
-	}
-}
-
-async function atualiza_taxas() {
-	if (!ativo) return;
-	try {
-		const responseFees = await fetch('https://mempool.space/api/v1/fees/precise');
-		const dataFees = await responseFees.json();
-		const fmt = v => `${parseFloat(v).toFixed(2).replace('.', ',')} sat/vB`;
-		document.getElementById('fastestFee').textContent = fmt(dataFees.fastestFee);
-		document.getElementById('halfHourFee').textContent = fmt(dataFees.halfHourFee);
-		document.getElementById('hourFee').textContent = fmt(dataFees.hourFee);
-		document.getElementById('minimumFee').textContent = fmt(dataFees.minimumFee);
-	} catch (error) {
-		console.error('Erro ao buscar dados de taxas:', error);
-	}
-
-	// Reagendar com intervalo aleatório
-	const proximoIntervalo = Math.floor(Math.random() * 20001 + UPDATE_TAXAS);
-	clearInterval(taxaIntervaloID);
-	taxaIntervaloID = setInterval(atualiza_taxas, proximoIntervalo);
-}
-
-// ---------------------------------------------------------------------------
-// Carregamento inicial
-// ---------------------------------------------------------------------------
-
-function verificarCarregamento() {
-	if (document.getElementById('info-price').textContent === '') {
-		loadingTime *= 1.2;
-		if (loadingTime > 2000) {
-			location.reload();
-		}
-		setTimeout(verificarCarregamento, loadingTime);
-	} else {
-		document.getElementById('tela-carregamento').style.display = 'none';
-		document.getElementById('conteudo').style.display = 'block';
-		loadingTime = 100;
-		if (isPyWebView) {
-			sincronizaAlertas();
-		}
-		// Silencia alarmes por 5s após o carregamento para evitar disparos imediatos
-		fazerTransicaoAlarme(5000);
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Sincronização de alertas com backend Python
-// ---------------------------------------------------------------------------
-
-async function sincronizaAlertas() {
-	const alertasPython = await pyWebviewCarregarAlerta();
-	const alertasLocais = JSON.parse(localStorage.getItem('alertasjson')) || [];
-	const alertasSalvos = alertasPython || [];
-	if (JSON.stringify(alertasSalvos) !== JSON.stringify(alertasLocais)) {
-		localStorage.setItem('alertasjson', JSON.stringify(alertasSalvos));
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Alertas — lógica de verificação
-// ---------------------------------------------------------------------------
-
-function checarAlarmes() {
-	let alertas = [];
-	try {
-		alertas = JSON.parse(localStorage.getItem('alertasjson')) || [];
-	} catch (e) {
-		console.error("Erro ao parsear alertas do localStorage:", e);
+		for (const botao of document.querySelectorAll('.btns')) botao.style.display = 'flex';
 		return;
 	}
-
-	if (transicaoAlarme !== 0 || alertas.length === 0) return;
-
-	alertas.forEach((alerta, index) => {
-		if (alerta.tipo === TIPO_MAIOR && lastPriceBRL >= alerta.valor) {
-			dispararAlerta('O Preço do Bitcoin superou', alerta.valor, index);
-		} else if (alerta.tipo === TIPO_MENOR && lastPriceBRL <= alerta.valor) {
-			dispararAlerta('O Preço do Bitcoin caiu abaixo de', alerta.valor, index);
-		} else if (alerta.tipo === TIPO_DESATIVADO) {
-			fazerTransicaoAlarme();
-		} else if (alerta.tipo !== TIPO_MAIOR && alerta.tipo !== TIPO_MENOR && alerta.tipo !== TIPO_DESATIVADO) {
-			console.warn("Tipo de alarme desconhecido:", alerta.tipo);
-		}
-	});
+	// No navegador só fazem sentido Pausar e Alertas.
+	const pausarBtn = el('pausar-btn');
+	pausarBtn.style.left = 'unset';
+	pausarBtn.style.right = '0px';
+	pausarBtn.style.display = 'flex';
+	const alertaBtn = el('alerta-btn');
+	alertaBtn.style.left = '0px';
+	alertaBtn.style.display = 'flex';
 }
 
-function dispararAlerta(mensagem, valor, index) {
-	if (contadorAlerta !== 0) return;
-	contadorAlerta = 1;
-	const valorFormatado = (parseFloat(valor) || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
-	$.alert({
-		title: 'ALERTA',
-		content: `${mensagem}<br>${valorFormatado}`,
-		theme: 'dark',
-		onClose: function() {
-			contadorAlerta = 0;
-			mudarTipo(index, true); // passa booleano em vez de expressão de atribuição
+// ---------------------------------------------------------------------------
+// Diálogo (substitui o jquery-confirm). Mensagens ficam em fila.
+// ---------------------------------------------------------------------------
+
+const filaDialogos = [];
+let dialogoAtual = null;
+
+/**
+ * @param {{titulo: string, linhas: string[], autoFecharMs?: number, aoFechar?: Function}} opcoes
+ */
+function mostrarDialogo(opcoes) {
+	filaDialogos.push(opcoes);
+	if (!dialogoAtual) exibirProximoDialogo();
+}
+
+function aviso(titulo, mensagem, autoFecharMs = 0) {
+	mostrarDialogo({ titulo, linhas: [mensagem], autoFecharMs });
+}
+
+function exibirProximoDialogo() {
+	dialogoAtual = filaDialogos.shift() ?? null;
+	if (!dialogoAtual) return;
+
+	const dialogo = el('dialogo');
+	el('dialogo-titulo').textContent = dialogoAtual.titulo;
+	const conteudo = el('dialogo-conteudo');
+	conteudo.replaceChildren();
+	dialogoAtual.linhas.forEach((linha, indice) => {
+		if (indice > 0) conteudo.append(document.createElement('br'));
+		conteudo.append(linha); // texto puro: nunca interpretado como HTML
+	});
+
+	const botao = el('dialogo-ok');
+	botao.textContent = 'OK';
+	if (dialogoAtual.autoFecharMs > 0) {
+		let restante = Math.ceil(dialogoAtual.autoFecharMs / 1000);
+		botao.textContent = `OK (${restante})`;
+		dialogoAtual.contagem = setInterval(() => {
+			restante--;
+			if (restante <= 0) dialogo.close();
+			else botao.textContent = `OK (${restante})`;
+		}, 1000);
+	}
+	dialogo.showModal();
+	botao.focus();
+}
+
+function aoFecharDialogo() {
+	const encerrado = dialogoAtual;
+	clearInterval(encerrado?.contagem);
+	try {
+		encerrado?.aoFechar?.();
+	} finally {
+		exibirProximoDialogo();
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Alertas: armazenamento
+//
+// A lista "alertas" em memória é a fonte da verdade no JS. Ela é normalizada
+// uma única vez, ao carregar. No app a persistência é o Alertas.json (o
+// localStorage do pywebview não sobrevive ao reinício); no navegador, o localStorage.
+// ---------------------------------------------------------------------------
+
+/** No navegador, carrega a lista do localStorage (no app, ver sincronizarAlertas). */
+function carregarAlertasLocais() {
+	let bruto;
+	try {
+		bruto = JSON.parse(localStorage.getItem(CHAVE_ALERTAS) ?? '[]');
+	} catch (erro) {
+		console.error('Alertas inválidos no localStorage:', erro);
+		return;
+	}
+	const { alertas: lista, alterado } = normalizarLista(bruto);
+	alertas = lista;
+	if (alterado) gravarLocal(alertas);
+}
+
+function gravarLocal(lista) {
+	try {
+		localStorage.setItem(CHAVE_ALERTAS, JSON.stringify(lista));
+	} catch (erro) {
+		console.error('Erro ao gravar alertas no localStorage:', erro);
+	}
+}
+
+// Gravações em disco em fila: a ordem de chegada ao Python é a ordem das mudanças.
+let filaGravacao = Promise.resolve();
+
+function persistirEmDisco(lista) {
+	filaGravacao = filaGravacao
+		.then(() => chamarApi('salvar_alerta', lista)) // chamarApi nunca rejeita
+		.then(sucesso => {
+			if (sucesso !== true) aviso('FALHA', 'Não foi possível salvar os alertas em disco.', 15000);
+		});
+}
+
+/** Ordena, atualiza a lista em memória e persiste. As listas nunca são alteradas no lugar. */
+function gravarAlertas(lista) {
+	alertas = ordenarAlertas(lista);
+	if (isPyWebView) persistirEmDisco(alertas);
+	else gravarLocal(alertas);
+}
+
+/** No app, o arquivo em disco é a fonte da verdade. */
+async function sincronizarAlertas() {
+	const doDisco = await chamarApi('carregar_alerta');
+	if (!Array.isArray(doDisco)) {
+		// null = arquivo ilegível ou corrompido (o Python guarda uma cópia .bak); undefined = falha na chamada.
+		if (doDisco === null) {
+			aviso('FALHA', 'O arquivo de alertas estava corrompido. Uma cópia .bak foi salva em %APPDATA%\\btcstatus.');
+		} else {
+			aviso('FALHA', 'Não foi possível carregar os alertas salvos.');
+		}
+		return;
+	}
+	const { alertas: lista, alterado } = normalizarLista(doDisco);
+	alertas = lista;
+	Metricas.marcar('alertas_sincronizados');
+	if (alterado) persistirEmDisco(alertas); // migração de formato antigo
+	if (modalAlertaAberto()) renderizarTabelaAlertas();
+}
+
+// ---------------------------------------------------------------------------
+// Alertas: verificação e disparo
+// ---------------------------------------------------------------------------
+
+function silenciarAlarmes(duracao = SILENCIO_PADRAO) {
+	alarmesSilenciados = true;
+	clearTimeout(timers.silencio);
+	timers.silencio = setTimeout(() => { alarmesSilenciados = false; }, duracao);
+}
+
+function checarAlarmes() {
+	if (alarmesSilenciados || alertaAberto) return;
+	// O preço mantido na tela durante falhas não dispara alarmes.
+	const preco = falhasBRL === 0 ? ultimoPrecoBRL : NaN;
+	const alerta = Metricas.medir('alarmes:checar', () => alertaParaDisparar(alertas, preco));
+	if (alerta) dispararAlerta(alerta);
+}
+
+function dispararAlerta(alerta) {
+	alertaAberto = true;
+	const mensagem = alerta.tipo === TIPO.MAIOR ? 'O Preço do Bitcoin superou' : 'O Preço do Bitcoin caiu abaixo de';
+	mostrarDialogo({
+		titulo: 'ALERTA',
+		linhas: [mensagem, formatoBRL.format(alerta.valor)],
+		aoFechar: () => {
+			alertaAberto = false;
+			const atualizada = desativarAposDisparo(alertas, alerta.id);
+			if (atualizada === alertas) return; // o alerta foi apagado enquanto o diálogo estava aberto
+			gravarAlertas(atualizada);
+			if (modalAlertaAberto()) renderizarTabelaAlertas();
 		},
-		draggable: false,
-		boxWidth: '300px',
-		useBootstrap: false,
 	});
 	tocarAlerta();
 }
 
+function tocarAlerta() {
+	audioAlerta ??= new Audio('alerta.mp3');
+	audioAlerta.currentTime = 0;
+	audioAlerta.play().catch(() => aviso('FALHA', 'Falha ao reproduzir áudio.', 3000));
+}
+
 // ---------------------------------------------------------------------------
-// Alertas — CRUD e interface
+// Alertas: tela de cadastro
 // ---------------------------------------------------------------------------
 
-function mostrarTelaAlerta() {
-	const modal = document.getElementById("modalAlerta");
-	const darkback = document.getElementById('darkback');
-	const estaAberto = modal.style.display === "block";
-	modal.style.display = estaAberto ? "none" : "block";
-	darkback.style.display = estaAberto ? "none" : "flex";
-	carregarAlertas();
+function modalAlertaAberto() {
+	return ui.modal.style.display === 'block';
+}
+
+function alternarTelaAlerta() {
+	const abrir = !modalAlertaAberto();
+	ui.modal.style.display = abrir ? 'block' : 'none';
+	ui.darkback.style.display = abrir ? 'flex' : 'none';
+	if (abrir) renderizarTabelaAlertas();
+	else ui.campoValor.value = '';
 }
 
 function criarAlerta() {
-	const valor = document.getElementById("valorAlerta").value; // corrigido: era variável global implícita
-	if (validarValor(valor)) {
-		salvarAlerta(valor, TIPO_MAIOR, 0);
+	const valor = converterValor(ui.campoValor.value);
+
+	if (valor === null) {
+		aviso('FALHA', 'Digite um número válido maior que zero.', 15000);
+	} else if (existeDuplicado(alertas, valor, TIPO.MAIOR)) {
+		aviso('FALHA', 'Existe um alerta com esse mesmo valor.', 15000);
+	} else if (alertas.length >= MAX_ALERTAS) {
+		aviso('FALHA', `Limite de ${MAX_ALERTAS} alertas atingido.`, 15000);
 	} else {
-		$.alert({
-			title: 'FALHA',
-			content: 'Digite um número válido.',
-			theme: 'dark',
-			draggable: false,
-			boxWidth: '300px',
-			useBootstrap: false,
-			autoClose: 'ok|15000',
-		});
+		gravarAlertas([...alertas, { id: novoId(), valor, tipo: TIPO.MAIOR }]);
+		silenciarAlarmes();
 	}
-	carregarAlertas();
+	renderizarTabelaAlertas();
 }
 
-function validarValor(numero) {
-	const paraValidar = parseFloat(numero);
-	return !isNaN(paraValidar) && String(numero).trim() !== "";
+function apagarAlerta(id) {
+	gravarAlertas(alertas.filter(a => a.id !== id));
+	renderizarTabelaAlertas();
 }
 
-function salvarAlerta(valor, tipo, vazio) {
-	let alertas = JSON.parse(localStorage.getItem('alertasjson')) || [];
-	const alertaExistente = alertas.find(a => a.valor === valor && a.tipo === tipo);
-	if (alertaExistente) {
-		$.alert({
-			title: 'FALHA',
-			content: 'Existe um alerta com esse mesmo valor.',
-			theme: 'dark',
-			draggable: false,
-			boxWidth: '300px',
-			useBootstrap: false,
-			autoClose: 'ok|15000',
-		});
+function alternarTipoAlerta(id) {
+	const alvo = alertas.find(a => a.id === id);
+	if (!alvo) return;
+
+	const novoTipo = PROXIMO_TIPO[alvo.tipo];
+	if (existeDuplicado(alertas, alvo.valor, novoTipo, id)) {
+		aviso('FALHA', 'Existe um alerta com esse mesmo valor.', 5000);
 		return;
 	}
-	alertas.push({ valor, tipo, vazio });
-	localStorage.setItem('alertasjson', JSON.stringify(alertas));
-	if (isPyWebView) {
-		pyWebviewSalvarAlerta(alertas);
-	}
-	fazerTransicaoAlarme();
+	gravarAlertas(alertas.map(a => (a.id === id ? { ...a, tipo: novoTipo } : a)));
+	silenciarAlarmes();
+	renderizarTabelaAlertas();
 }
 
-function voltarAlerta() {
-	limparValor();
-	mostrarTelaAlerta();
+const ROTULO_TIPO = {
+	[TIPO.MAIOR]: { texto: 'Maior △', dica: v => `Alertar quando BTC for maior que ${v}` },
+	[TIPO.MENOR]: { texto: 'Menor ▽', dica: v => `Alertar quando BTC for menor que ${v}` },
+	[TIPO.DESATIVADO]: { texto: 'Desativado', dica: () => 'Alarme desativado' },
+};
+
+function criarBotao(classe, acao, texto, dica) {
+	const botao = document.createElement('button');
+	botao.type = 'button';
+	botao.className = `botao-padrao ${classe}`;
+	botao.dataset.acao = acao;
+	botao.textContent = texto;
+	botao.title = dica;
+	return botao;
 }
 
-function limparValor() {
-	const campo = document.getElementById('valorAlerta');
-	if (campo.value !== "") campo.value = "";
+function criarCelula(...filhos) {
+	const celula = document.createElement('td');
+	celula.append(...filhos);
+	return celula;
 }
 
-function limparMoeda(numero) {
-	const valorSemSimbolo = numero.replace('R$', '').trim();
-	const valorSemMilhar = valorSemSimbolo.replace('.', '').replace(',', '.');
-	return parseFloat(valorSemMilhar);
+function renderizarTabelaAlertas() {
+	Metricas.medir('render:tabela_alertas', montarTabelaAlertas);
 }
 
-function apagarAlertas(index) {
-	let alertas = JSON.parse(localStorage.getItem('alertasjson')) || [];
-	alertas.splice(index, 1);
-	localStorage.setItem('alertasjson', JSON.stringify(alertas));
-	if (isPyWebView) {
-		pyWebviewSalvarAlerta(alertas);
+function montarTabelaAlertas() {
+	const linhas = document.createDocumentFragment();
+
+	for (const alerta of alertas) {
+		const valorFormatado = formatoBRL.format(alerta.valor);
+		const rotulo = ROTULO_TIPO[alerta.tipo];
+
+		const botaoTipo = criarBotao('botaoTipo', 'tipo', rotulo.texto, rotulo.dica(valorFormatado));
+		botaoTipo.classList.toggle('desativado', alerta.tipo === TIPO.DESATIVADO);
+		const botaoApagar = criarBotao('botaoApagar', 'apagar', 'Apagar', `Apagar alarme ${valorFormatado}`);
+
+		const celulaValor = criarCelula(valorFormatado);
+		celulaValor.title = valorFormatado;
+
+		const linha = document.createElement('tr');
+		linha.dataset.id = alerta.id;
+		linha.append(criarCelula(botaoTipo), celulaValor, criarCelula(botaoApagar));
+		linhas.append(linha);
 	}
-	carregarAlertas();
+
+	ui.corpoTabela.replaceChildren(linhas);
+
+	ui.campoValor.value = '';
+	if (modalAlertaAberto()) ui.campoValor.focus();
 }
 
-function carregarAlertas() {
-	const tabela = document.getElementById("alertasTabela").getElementsByTagName('tbody')[0];
-	tabela.innerHTML = '';
-
-	let alertas = [];
-	try {
-		alertas = JSON.parse(localStorage.getItem('alertasjson')) || [];
-		const alertasOrdenados = [...alertas].sort((a, b) => b.valor - a.valor);
-		if (JSON.stringify(alertas) !== JSON.stringify(alertasOrdenados)) {
-			localStorage.setItem('alertasjson', JSON.stringify(alertasOrdenados));
-			alertas = alertasOrdenados;
-		}
-	} catch (e) {
-		console.error("Erro ao parsear alertas do localStorage:", e);
-	}
-
-	// Usar DocumentFragment para inserir todas as linhas de uma vez (evita múltiplos reflows)
-	const fragment = document.createDocumentFragment();
-
-	alertas.forEach((valorAlerta, index) => {
-		const valorAlertaFormatado = parseFloat(valorAlerta.valor).toLocaleString('pt-BR', {
-			style: 'currency',
-			currency: 'BRL',
-			minimumFractionDigits: 2
-		});
-
-		const novaLinha = document.createElement('tr');
-
-		// Célula de tipo
-		const celulatipo = document.createElement('td');
-		const botaotipo = document.createElement("button");
-		botaotipo.className = "botaoTipo"; // corrigido: classe em vez de ID duplicado
-		botaotipo.type = "button";
-		botaotipo.onclick = function() {
-			mudarTipo(index);
-			fazerTransicaoAlarme();
-		};
-		if (valorAlerta.tipo === TIPO_MAIOR) {
-			botaotipo.textContent = "Maior △";
-			botaotipo.title = "Alertar quando BTC for maior que " + valorAlertaFormatado;
-			botaotipo.style.opacity = "1";
-		} else if (valorAlerta.tipo === TIPO_MENOR) {
-			botaotipo.textContent = "Menor ▽";
-			botaotipo.title = "Alertar quando BTC for menor que " + valorAlertaFormatado;
-			botaotipo.style.opacity = "1";
-		} else if (valorAlerta.tipo === TIPO_DESATIVADO) {
-			botaotipo.textContent = "Desativado";
-			botaotipo.title = "Alarme desativado";
-			botaotipo.style.opacity = "0.5";
-		}
-		celulatipo.appendChild(botaotipo);
-		novaLinha.appendChild(celulatipo);
-
-		// Célula de valor
-		const celulaValor = document.createElement('td');
-		celulaValor.textContent = valorAlertaFormatado;
-		celulaValor.title = valorAlertaFormatado;
-		novaLinha.appendChild(celulaValor);
-
-		// Célula de ação
-		const celulaAcao = document.createElement('td');
-		const botaoApagar = document.createElement("button");
-		botaoApagar.className = "botaoApagar"; // corrigido: classe em vez de ID duplicado
-		botaoApagar.textContent = "Apagar";
-		botaoApagar.title = "Apagar alarme " + valorAlertaFormatado;
-		botaoApagar.onclick = function() { apagarAlertas(index); };
-		celulaAcao.appendChild(botaoApagar);
-		novaLinha.appendChild(celulaAcao);
-
-		fragment.appendChild(novaLinha);
-	});
-
-	tabela.appendChild(fragment); // Inserção única no DOM
-
-	// Limpa e foca o campo
-	const campoValor = document.getElementById('valorAlerta');
-	campoValor.value = "";
-	campoValor.focus();
-
-	// Remove o listener anterior antes de adicionar um novo (evita acúmulo de listeners)
-	if (valorAlertaKeydownHandler) {
-		campoValor.removeEventListener('keydown', valorAlertaKeydownHandler);
-	}
-	valorAlertaKeydownHandler = function(event) {
-		if (event.key === 'Enter') {
-			event.preventDefault();
-			if (document.getElementById("modalAlerta").style.display === "block" && this.value.trim() !== '') {
-				criarAlerta();
-			}
-		}
-		if (event.key === 'Escape') {
-			if (document.getElementById("modalAlerta").style.display === "block") {
-				voltarAlerta();
-			}
-		}
-	};
-	campoValor.addEventListener('keydown', valorAlertaKeydownHandler);
+/** Um único listener para todos os botões da tabela (delegação de eventos). */
+function aoClicarTabela(evento) {
+	const botao = evento.target.closest('button[data-acao]');
+	const id = botao?.closest('tr')?.dataset.id;
+	if (!id) return;
+	if (botao.dataset.acao === 'tipo') alternarTipoAlerta(id);
+	else if (botao.dataset.acao === 'apagar') apagarAlerta(id);
 }
 
-function mudarTipo(index, desativarForçado = false) {
-	let alertas = [];
-	try {
-		alertas = JSON.parse(localStorage.getItem('alertasjson')) || [];
-	} catch (e) {
-		console.error("Erro ao parsear alertas do localStorage:", e);
-		return;
+function aoTeclarValorAlerta(evento) {
+	if (!modalAlertaAberto()) return;
+	if (evento.key === 'Enter') {
+		evento.preventDefault();
+		if (evento.target.value.trim() !== '') criarAlerta();
+	} else if (evento.key === 'Escape') {
+		alternarTelaAlerta();
 	}
-
-	if (index < 0 || index >= alertas.length) {
-		console.error("Índice de alerta inválido:", index);
-		return;
-	}
-
-	const valor = alertas[index].valor;
-	const tipoOriginal = alertas[index].tipo;
-
-	let tipoAlterado;
-	if (desativarForçado) {
-		tipoAlterado = TIPO_DESATIVADO;
-	} else if (tipoOriginal === TIPO_MAIOR) {
-		tipoAlterado = TIPO_MENOR;
-	} else if (tipoOriginal === TIPO_MENOR) {
-		tipoAlterado = TIPO_DESATIVADO;
-	} else if (tipoOriginal === TIPO_DESATIVADO) {
-		tipoAlterado = TIPO_MAIOR;
-	} else {
-		console.warn("Tipo de alerta desconhecido:", tipoOriginal);
-		return;
-	}
-
-	alertas[index].tipo = tipoAlterado;
-
-	// Checar duplicata com o novo tipo (excluindo o próprio alerta)
-	const alertaExistente = alertas.some((a, i) => a.valor === valor && a.tipo === tipoAlterado && i !== index);
-	if (alertaExistente) {
-		$.alert({
-			title: 'FALHA',
-			content: 'Existe um alerta com esse mesmo valor.',
-			theme: 'dark',
-			draggable: false,
-			boxWidth: '300px',
-			useBootstrap: false,
-			autoClose: 'ok|5000',
-		});
-		return;
-	}
-
-	try {
-		localStorage.setItem('alertasjson', JSON.stringify(alertas));
-		if (isPyWebView) {
-			pyWebviewSalvarAlerta(alertas);
-		}
-	} catch (e) {
-		console.error("Erro ao salvar alertas no localStorage:", e);
-	}
-
-	carregarAlertas();
-}
-
-// ---------------------------------------------------------------------------
-// Áudio de alerta
-// ---------------------------------------------------------------------------
-
-function tocarAlerta(repeticoes = 1, volume = 1) {
-	const audio = new Audio('alerta.mp3');
-	audio.volume = volume;
-	audio.preload = 'auto';
-	let contador = 0;
-
-	audio.addEventListener('canplaythrough', () => {
-		const tocar = () => {
-			if (contador < repeticoes) {
-				audio.play().catch(() => {
-					$.alert({
-						title: 'FALHA',
-						content: 'Falha ao reproduzir áudio.',
-						theme: 'dark',
-						draggable: false,
-						boxWidth: '300px',
-						useBootstrap: false,
-						autoClose: 'ok|3000',
-					});
-				});
-				contador++;
-				audio.onended = () => setTimeout(tocar, 100);
-			}
-		};
-		tocar();
-	}, { once: true }); // 'once: true' evita acúmulo do listener no mesmo objeto de audio
-
-	audio.load();
 }
 
 // ---------------------------------------------------------------------------
 // Inicialização
 // ---------------------------------------------------------------------------
 
-window.addEventListener('load', () => {
-	botoesPywebview();
-	inicial();
-	atualiza_taxas();
-	setTimeout(verificarCarregamento, loadingTime);
-	setInterval(verificarInatividade, TEMPO_VERIFICAR_INATIVIDADE);
+function aposCarregarPagina() {
+	audioAlerta ??= new Audio('alerta.mp3');
+	audioAlerta.preload = 'auto';
+	// No app, o gráfico espera também a ponte do Python: o script do TradingView
+	// (tarefa longa de ~60 ms) atrasaria a injeção do pywebview, que vem logo após o "load".
+	const montar = () => quandoOcioso(atualizarGrafico, ESPERA_OCIOSA_GRAFICO);
+	if (isPyWebView) obterApi().catch(() => {}).finally(montar);
+	else montar();
+}
+
+function quandoOcioso(funcao, prazoMs) {
+	if (typeof requestIdleCallback === 'function') requestIdleCallback(() => funcao(), { timeout: prazoMs });
+	else setTimeout(funcao, 0);
+}
+
+async function fecharJanela() {
+	gravarEstado(true);
+	await enviarMetricas('encerramento');
+	chamarApi('fechar');
+}
+
+function registrarEventos() {
+	const cliques = {
+		'centralizar-btn': () => chamarApi('centralizar'),
+		'reload-btn': reiniciar,
+		'pausar-btn': pararIniciar,
+		'fixar-btn': alternarFixar,
+		'alerta-btn': alternarTelaAlerta,
+		'minimize-btn': () => chamarApi('minimizar'),
+		'close-btn': fecharJanela,
+		'close-btn-carregamento': fecharJanela,
+		'grafico-btn': alternarGrafico,
+		'overlay': pararIniciar,
+		'darkback': alternarTelaAlerta,
+		'salvarBotao': criarAlerta,
+		'voltarBotao': alternarTelaAlerta,
+	};
+	for (const [id, acao] of Object.entries(cliques)) el(id).addEventListener('click', acao);
+
+	ui.corpoTabela.addEventListener('click', aoClicarTabela);
+	el('inputForm').addEventListener('submit', evento => evento.preventDefault());
+	ui.campoValor.addEventListener('keydown', aoTeclarValorAlerta);
+	el('dialogo').addEventListener('close', aoFecharDialogo);
+
+	document.addEventListener('keydown', registrarInteracao, { passive: true });
+	document.addEventListener('mousemove', registrarInteracao, { passive: true });
+	document.addEventListener('visibilitychange', () => {
+		if (document.visibilityState === 'hidden') gravarEstado(true);
+		else if (ativo) adquirirWakeLock();
+	});
+	window.addEventListener('pagehide', () => gravarEstado(true));
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+	Metricas.marcar('dom_pronto');
+	capturarElementos();
+	registrarEventos();
+	configurarBotoesJanela();
+	restaurarEstadoSalvo(); // antes das requisições: a tela já abre com os últimos valores
+	if (isPyWebView) sincronizarAlertas(); // a tela de carregamento cobre a interface até lá
+	else carregarAlertasLocais();
+	iniciarCiclos();
+	atualizarBotaoPausa();
+	// O gráfico e o som só entram depois do "load": um iframe ou mídia ainda carregando
+	// atrasaria o "load" e, com ele, a ponte do pywebview (injetada no
+	// NavigationCompleted do WebView2, que acompanha o "load").
+	if (document.readyState === 'complete') aposCarregarPagina();
+	else window.addEventListener('load', aposCarregarPagina, { once: true });
+	setInterval(verificarInatividade, INTERVALO_VERIFICAR_INATIVIDADE);
+	if (isPyWebView) sincronizarEstadoTopo();
+	Metricas.marcar('inicializacao_js_concluida');
 });

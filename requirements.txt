@@ -1,0 +1,8 @@
+# Dependências de execução do BTC Status (Windows, Python 3.14).
+# Instalação: .venv\Scripts\python.exe -m pip install -r requirements.txt
+#
+# O pywebview instala sozinho o pythonnet no Windows (usado pelo motor Edge/WebView2).
+# O código foi conferido contra a API do pywebview 6.2.1 (window.x/y, window.move,
+# webview.screens, execução da js_api em threads); por isso o limite inferior em 6.2.
+# Não usar window.on_top: trava o app nessa versão (ver topo_janela.py).
+pywebview>=6.2,<7

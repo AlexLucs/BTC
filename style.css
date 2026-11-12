@@ -1,40 +1,34 @@
-/* Reset and general styles */
+/* ---------------------------------------------------------------------------
+   Variáveis
+   --------------------------------------------------------------------------- */
+:root {
+    --laranja: #f7931a;
+    --cinza-escuro: #646464;
+    --cinza-claro: #b5b5b5;
+    --fundo: black;
+    --texto: white;
+    --borda: 1px outset white;
+    --borda-janela: 3px outset white;
+    /* Só as propriedades que mudam no hover/foco ("all" acompanharia todas). */
+    --transicao: background-color 0.4s cubic-bezier(0.36, 0.55, 0.19, 1), color 0.4s cubic-bezier(0.36, 0.55, 0.19, 1);
+    --altura-barra: 40px;
+}
+
+/* ---------------------------------------------------------------------------
+   Base
+   --------------------------------------------------------------------------- */
 *, *::before, *::after {
     padding: 0;
     margin: 0;
     box-sizing: border-box;
-    cursor: default;
 }
 
-/* jConfirm Plugin Styles - Dark Theme */
-.jconfirm.jconfirm-dark .jconfirm-bg {
-    background-color: black;
-    opacity: 0.4;
-}
-
-.jconfirm.jconfirm-black .jconfirm-box,
-.jconfirm.jconfirm-dark .jconfirm-box {
-    border: 3px outset white;
-}
-
-.jconfirm.jconfirm-dark .jconfirm-box .jconfirm-buttons button.btn-default {
-    border: 1px outset white;
-}
-
-.jconfirm.jconfirm-black .jconfirm-box,
-.jconfirm.jconfirm-dark .jconfirm-box,
-.jconfirm.jconfirm-dark .jconfirm-box .jconfirm-buttons button.btn-default {
-    background: black;
-    color: #f7931a;
-}
-
-.jconfirm.jconfirm-dark .jconfirm-box .jconfirm-buttons button.btn-default:hover {
-    color: white;
-    background: #f7931a;
-    border: 1px outset white;
-}
-
-/* Font Face Definition */
+/* Roboto.woff2 contém só o subconjunto "latin" (U+0000-00FF, pontuação e moedas),
+   gerado com: pyftsubset Roboto.woff2 --unicodes="U+0000-00FF,U+0131,U+0152-0153,
+   U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,
+   U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD" --layout-features='*' --flavor=woff2.
+   Os símbolos da interface (₿, setas, ▶◀, ⏸...) nunca estiveram na Roboto: vêm da
+   fonte do sistema. */
 @font-face {
     font-family: 'Roboto';
     src: url('Roboto.woff2') format('woff2');
@@ -42,13 +36,10 @@
     font-style: normal;
 }
 
-/* Body Styles */
 body {
-    background-color: black;
-    color: white;
+    background-color: var(--fundo);
+    color: var(--texto);
     font-family: 'Roboto', sans-serif;
-    margin: 0;
-    padding: 0;
     text-align: center;
     display: flex;
     flex-direction: column;
@@ -56,385 +47,389 @@ body {
     align-items: center;
     height: 100vh;
     width: 100vw;
+    cursor: default;
 }
 
-/* Loading Screen Styles */
-#tela-carregamento {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    background: rgba(0, 0, 0, 1);
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    font-size: 100px;
-    color: #f7931a;
-    z-index: 10000;
+input {
+    cursor: text;
 }
 
-/* Spinning Animation Class */
-.girando {
-    animation: girandosimbolo 0.4s infinite linear;
-}
-
-/* Spinning Animation Keyframes */
-@keyframes girandosimbolo {
-    0%   { transform: rotate(0deg); }
-    25%  { transform: rotate(90deg); }
-    50%  { transform: rotate(180deg); }
-    75%  { transform: rotate(270deg); }
-    100% { transform: rotate(360deg); }
-}
-
-/* pywebview Drag Region Style */
+/* Região de arrasto da janela sem moldura (pywebview) */
 .pywebview-drag-region {
     position: fixed;
     top: 0;
     height: 100%;
 }
 
-/* Alert Modal (Hidden by default) */
-#modalAlerta {
-    display: none;
-}
-
-/* Modal Container Styles */
-.modal {
+/* ---------------------------------------------------------------------------
+   Tela de carregamento
+   --------------------------------------------------------------------------- */
+#tela-carregamento {
     position: fixed;
-    z-index: 20;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    background-color: black;
-    color: white;
-    font-family: 'Roboto', sans-serif;
-    text-align: center;
-    opacity: 1;
-    border: 3px outset white;
+    inset: 0;
+    background: var(--fundo);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    font-size: 100px;
+    color: var(--laranja);
+    z-index: 10000;
 }
 
-/* Modal Content Styles */
-.modal-content {
-    background-color: black;
-    margin: 0;
-    padding: 15px;
+.girando {
+    animation: girar 0.4s infinite linear;
 }
 
-.modal-content p {
-    font-size: xx-large;
-    color: #f7931a;
-    margin-bottom: 20px;
+@keyframes girar {
+    to { transform: rotate(360deg); }
 }
 
-/* Number Input Styles */
-input[type="number"] {
-    font-size: larger;
-    font-weight: bolder;
-    border: 1px outset white;
-    margin: 0 0 20px 0;
-    height: 40px;
-    text-align: center;
-    padding: 10px;
-    color: #f7931a;
-    background-color: black;
-    -webkit-appearance: textfield;
-    -moz-appearance: textfield;
-}
-
-/* Hide Spin Buttons on Number Inputs (Webkit) */
-input[type="number"]::-webkit-outer-spin-button,
-input[type="number"]::-webkit-inner-spin-button {
-    -webkit-appearance: none;
-    margin: 0;
-}
-
-/* Alert Buttons Container */
-#botoesAlerta {
-    margin-top: 20px;
-}
-
-/* Button Base Styles */
-button[type="button"] {
-    background-color: black;
-    color: #f7931a;
-    border: 1px outset white;
-    transition: all 0.4s cubic-bezier(0.36, 0.55, 0.19, 1);
-    text-align: center;
-    white-space: nowrap;
-    overflow: hidden;
-    box-sizing: border-box;
+#close-btn-carregamento {
+    position: absolute;
+    top: 0;
+    right: 4px;
+    width: 40px;
+    background: none;
+    border: none;
+    font: inherit;
+    font-size: 1.5rem;
+    color: var(--texto);
     cursor: pointer;
 }
 
-/* Specific Button IDs Styles */
+/* ---------------------------------------------------------------------------
+   Botões
+   --------------------------------------------------------------------------- */
+
+/* Botões de formulário, da tabela de alertas e do diálogo */
+.botao-padrao {
+    background-color: var(--fundo);
+    color: var(--laranja);
+    border: var(--borda);
+    transition: var(--transicao);
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    cursor: pointer;
+    font: inherit;
+}
+
+.botao-padrao:hover,
+.botao-padrao:focus-visible {
+    background-color: var(--laranja);
+    color: var(--texto);
+}
+
 #salvarBotao,
 #voltarBotao {
     width: 100px;
     height: 40px;
 }
 
-/* Botões gerados dinamicamente na tabela de alertas — agora usam classes */
 .botaoApagar,
 .botaoTipo {
-    background-color: black;
-    color: #f7931a;
-    padding: 0;
-    transition: all 0.4s cubic-bezier(0.36, 0.55, 0.19, 1);
-    border: 1px outset white;
     height: 40px;
-    text-align: center;
-    white-space: nowrap;
-    overflow: hidden;
-    margin: 3px;
-    box-sizing: border-box;
     width: 70px;
-    cursor: pointer;
+    margin: 3px;
 }
 
-/* Button Hover State */
-button[type="button"]:hover,
-.botaoApagar:hover,
-.botaoTipo:hover {
-    background-color: #f7931a;
-    color: white;
+.botaoTipo.desativado {
+    opacity: 0.5;
 }
 
-/* Graph Container */
-.grafico {
-    position: fixed;
-    top: 437px;
-    left: 5%;
-    right: 5%; /* corrigido: era "rigth" (typo) */
-    justify-content: center;
-    align-items: center;
-    text-align: center;
-    flex-direction: column;
-    font-family: 'Roboto', sans-serif;
-}
-
-#grafico {
-    display: flex;
-    z-index: 2;
-}
-
-/* Overlay Container (Hidden by default) */
-.overlay {
-    display: none;
-    position: fixed;
-    top: 40px;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    justify-content: center;
-    align-items: center;
-    text-align: center;
-    flex-direction: column;
-    font-family: 'Roboto', sans-serif;
-}
-
-/* Dark Background for Overlays */
-#darkback {
-    z-index: 10;
-    background-color: rgba(0, 0, 0, 0.4);
-    transition: all 0.4s cubic-bezier(0.36, 0.55, 0.19, 1);
-}
-
-#overlay {
-    background-color: rgba(0, 0, 0, 0.4);
-    color: white;
-    font-size: 15rem;
-    z-index: 1000;
-}
-
-/* Top Buttons Styles */
+/* Controles da janela no topo (ocultos até o script decidir quais exibir) */
 .btns {
-    cursor: pointer;
     position: absolute;
     top: 4px;
     width: 40px;
     height: 40px;
-    display: flex;
+    display: none;
     justify-content: center;
     align-items: center;
+    background: none;
+    border: none;
+    font-family: inherit;
     font-size: x-large;
     font-weight: lighter;
-    color: white;
+    color: var(--texto);
+    cursor: pointer;
 }
 
-/* Top Buttons Hover/Focus State */
 .btns:hover,
-.btns:focus {
-    color: #f7931a;
+.btns:focus-visible {
+    color: var(--laranja);
 }
 
-/* Close Button Style */
-#close-btn {
-    right: 0px;
+#centralizar-btn { left: 0; }
+#reload-btn      { left: 40px; }
+#pausar-btn      { left: 80px; }
+#fixar-btn       { left: 120px; }
+#alerta-btn      { left: 160px; }
+#grafico-btn     { left: 200px; }
+#minimize-btn    { right: 40px; }
+#close-btn       { right: 0; }
+
+/* ---------------------------------------------------------------------------
+   Sobreposições
+   --------------------------------------------------------------------------- */
+.overlay {
+    display: none;
+    position: fixed;
+    top: var(--altura-barra);
+    left: 0;
+    width: 100%;
+    height: calc(100% - var(--altura-barra));
+    justify-content: center;
+    align-items: center;
+    flex-direction: column;
+    background-color: rgba(0, 0, 0, 0.4);
+}
+
+#darkback {
+    z-index: 10;
+}
+
+#overlay {
+    color: var(--texto);
+    font-size: 15rem;
+    z-index: 1000;
+    cursor: pointer;
+}
+
+/* ---------------------------------------------------------------------------
+   Tela de alertas
+   --------------------------------------------------------------------------- */
+#modalAlerta {
     display: none;
 }
 
-/* Loading Screen Close Button */
-#close-btn-carregamento {
-    right: 4px;
-    position: absolute;
-    top: 0px;
-    width: 40px;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    font-size: 1.5rem;
-    color: white;
+.modal {
+    position: fixed;
+    z-index: 20;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background-color: var(--fundo);
+    border: var(--borda-janela);
 }
 
-/* Animation for info-seta */
-@keyframes surgindo {
-    0%   { opacity: 0; }
-    25%  { opacity: 0.25; }
-    50%  { opacity: 0.5; }
-    75%  { opacity: 0.75; }
-    100% { opacity: 1; }
+.modal-content {
+    padding: 15px;
+}
+
+.modal-content p {
+    font-size: xx-large;
+    color: var(--laranja);
+    margin-bottom: 20px;
+}
+
+input[type="number"] {
+    display: block;
+    margin: 0 auto 20px;
+    height: 40px;
+    padding: 10px;
+    font-size: larger;
+    font-weight: bolder;
+    text-align: center;
+    color: var(--laranja);
+    background-color: var(--fundo);
+    border: var(--borda);
+    appearance: textfield;
+}
+
+/* Oculta as setas do campo numérico (WebKit/Chromium) */
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+/* A tela de alertas nunca passa da janela: só a lista rola. O .modal continua
+   "display: block" (script.js abre a tela com style.display = 'block'). */
+.modal-content {
+    max-height: calc(100vh - var(--altura-barra) - 20px);
+}
+
+.modal-content,
+#inputForm {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+#inputForm {
+    flex: 1 1 auto;
+}
+
+#listaAlertas {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    scrollbar-color: var(--laranja) var(--fundo);
+}
+
+#botoesAlerta {
+    margin-top: 20px;
+    flex: none;
+}
+
+/* ---------------------------------------------------------------------------
+   Diálogo de avisos (substitui o jquery-confirm)
+   --------------------------------------------------------------------------- */
+#dialogo {
+    margin: auto;
+    width: 300px;
+    padding: 15px;
+    background: var(--fundo);
+    color: var(--laranja);
+    border: var(--borda-janela);
+    font-family: 'Roboto', sans-serif;
+}
+
+#dialogo::backdrop {
+    background-color: rgba(0, 0, 0, 0.4);
+}
+
+#dialogo h2 {
+    font-size: 1.4rem;
+    margin-bottom: 10px;
+}
+
+#dialogo p {
+    margin-bottom: 15px;
+    color: var(--texto);
+}
+
+#dialogo-ok {
+    min-width: 80px;
+    height: 32px;
+    padding: 0 10px;
+}
+
+/* ---------------------------------------------------------------------------
+   Gráfico
+   --------------------------------------------------------------------------- */
+#grafico {
+    position: fixed;
+    top: 437px;
+    left: 5%;
+    right: 5%;
+    z-index: 2;
+    display: none; /* script.js (atualizarGrafico) exibe e monta o widget */
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+}
+
+/* ---------------------------------------------------------------------------
+   Informações
+   --------------------------------------------------------------------------- */
+#info-logo {
+    color: var(--laranja);
+    font-weight: bold;
+    margin-top: var(--altura-barra);
+}
+
+.btc_em_brl_principal,
+.percentual,
+.horario_atualizacao,
+.btc_em_usdt_secundario,
+.dolar_btc_e_b3 {
+    font-weight: 100;
+    color: var(--texto);
+}
+
+#info-price { color: var(--laranja); }
+#info-usdt  { color: var(--cinza-claro); }
+
+#taxa_topico,
+#info-time,
+#info-dolar {
+    color: var(--cinza-escuro);
+}
+
+/* A animação de surgimento é feita em script.js com element.animate(). */
+/* Valores do último estado salvo, exibidos ao abrir até chegarem dados novos */
+.desatualizado {
+    opacity: 0.55;
 }
 
 #info-seta {
     font-weight: bold;
-    opacity: 0;
+    color: var(--laranja);
 }
 
-/* Top Button Positions & Display (Hidden by default) */
-#minimize-btn   { right: 40px;  display: none; }
-#reload-btn     { left: 40px;   display: none; }
-#centralizar-btn { left: 0px;   display: none; }
-#alerta-btn     { left: 160px;  display: none; }
-#fixar-btn      { left: 120px;  display: none; }
-#pausar-btn     { left: 80px;   display: none; }
-#grafico-btn    { left: 200px;  display: none; }
-
-/* Info Logo Style */
-#info-logo {
-    color: #f7931a;
-    font-weight: bold;
-    margin-top: 40px;
+#info-seta.seta-neutra {
+    color: var(--texto);
 }
 
-/* Info Labels Text Alignment */
-#highPriceE,
-#lowPriceE,
-#highPriceDolE,
-#lowPriceDolE,
-#minimumFeeE,
-#fastestFeeE,
-#halfHourFeeE,
-#hourFeeE {
-    text-align: left;
-}
-
-/* Info Values Display and Color */
-#highPrice,
-#lowPrice,
-#highPriceDol,
-#lowPriceDol,
-#minimumFee,
-#fastestFee,
-#halfHourFee,
-#hourFee {
-    color: #ffffff;
-    display: flex;
-    justify-content: flex-end;
-}
-
-/* Topic Text Colors */
-#taxa_topico,
-#info-time,
-#info-dolar {
-    color: #646464;
-}
-
-#info-usdt {
-    color: #b5b5b5;
-}
-
-#info-price {
-    color: #f7931a;
-}
-
-/* Main Text Element Styles */
-.btc_em_brl_principal,
-.percentual,
-.horario_atualizacao,
-.btc_em_usdt_secundariol,
-.dolar_btc_e_b3 {
-    font-weight: 100;
-    color: white;
-    margin-top: 0px;
-}
-
-/* Bottom Left Info and Table Styles */
-.bottom-left-info,
 table {
     border-collapse: collapse;
     width: 100%;
 }
 
 .bottom-left-info {
-    font-size: 1.5vw;
-    color: white;
     width: 100%;
 }
 
 .bottom-left-info td {
-    color: #f7931a;
-    margin: 2px 0;
+    color: var(--laranja);
 }
 
-/* Separator Line Style */
+.bottom-left-info .rotulo {
+    text-align: left;
+}
+
+.bottom-left-info .valor {
+    color: var(--texto);
+    display: flex;
+    justify-content: flex-end;
+}
+
 .separator {
     border: none;
-    border-top: 1px solid white;
+    border-top: 1px solid var(--texto);
     margin: 5px 0;
 }
 
-/* --- Media Queries --- */
-
-/* Extra Large Screens */
+/* ---------------------------------------------------------------------------
+   Tamanhos de fonte por largura. A janela do app tem 500 px (só a última faixa
+   se aplica); as demais servem ao uso no navegador.
+   --------------------------------------------------------------------------- */
 @media (min-width: 1921px) {
     #info-logo               { font-size: 3.7vw; }
     .btc_em_brl_principal    { font-size: 3.2vw; }
-    .btc_em_usdt_secundariol { font-size: 1.8vw; }
+    .btc_em_usdt_secundario  { font-size: 1.8vw; }
     .dolar_btc_e_b3          { font-size: 0.7vw; }
     .percentual              { font-size: 3.7vw; }
     .horario_atualizacao     { font-size: 0.7vw; }
     .bottom-left-info, table { font-size: 0.7vw; }
 }
 
-/* Large Screens */
 @media (max-width: 1920px) {
     #info-logo               { font-size: 4.5vw; }
     .btc_em_brl_principal    { font-size: 4vw; }
-    .btc_em_usdt_secundariol { font-size: 2vw; }
+    .btc_em_usdt_secundario  { font-size: 2vw; }
     .dolar_btc_e_b3          { font-size: 1.4vw; }
     .percentual              { font-size: 4.5vw; }
     .horario_atualizacao     { font-size: 1.4vw; }
     .bottom-left-info, table { font-size: 1.4vw; }
 }
 
-/* Tablets */
 @media (max-width: 1024px) {
     #info-logo               { font-size: 8vw; }
     .btc_em_brl_principal    { font-size: 7vw; }
-    .btc_em_usdt_secundariol { font-size: 4vw; }
+    .btc_em_usdt_secundario  { font-size: 4vw; }
     .dolar_btc_e_b3          { font-size: 2.7vw; }
     .percentual              { font-size: 8vw; }
     .horario_atualizacao     { font-size: 2.7vw; }
     .bottom-left-info, table { font-size: 2.7vw; }
 }
 
-/* Mobile Devices */
 @media (max-width: 640px) {
     #info-logo               { font-size: 16vw; }
     .btc_em_brl_principal    { font-size: 14vw; }
-    .btc_em_usdt_secundariol { font-size: 8vw; }
+    .btc_em_usdt_secundario  { font-size: 8vw; }
     .dolar_btc_e_b3          { font-size: 3.5vw; }
     .percentual              { font-size: 16vw; }
     .horario_atualizacao     { font-size: 3.5vw; }
