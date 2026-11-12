@@ -11,6 +11,9 @@
     Inclui a medicao de desempenho (metricas.py e o coletor real do metricas.js),
     para usar com tools\medir_abertura.py --exe. Sem esta opcao o build e o de
     producao, sem nenhuma medicao.
+.NOTES
+    Para antes de tudo se houver um BTC Monitor.exe aberto a partir da pasta dist
+    (ele trava os arquivos que o build precisa apagar).
 .EXAMPLE
     .\criar_exe_btc.ps1
     .\criar_exe_btc.ps1 -SemTestes
@@ -33,6 +36,20 @@ foreach ($arquivo in @($python, $spec)) {
         Write-Host "Erro: arquivo nao encontrado: $arquivo" -ForegroundColor Red
         exit 1
     }
+}
+
+# Um BTC Monitor.exe aberto a partir da pasta dist trava os arquivos dela (ex.: ClrLoader.dll)
+# e o PyInstaller falha ao apaga-la, no fim do build. Avisa antes e nao encerra nada sozinho.
+$pastaDist = Split-Path $exe
+$abertos = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+    $_.Path -and $_.Path.StartsWith($pastaDist + "\", [System.StringComparison]::OrdinalIgnoreCase)
+})
+if ($abertos.Count -gt 0) {
+    Write-Host "Erro: feche o BTC Monitor antes de gerar o executavel. Processos abertos da pasta dist:" -ForegroundColor Red
+    $abertos | ForEach-Object { Write-Host ("  PID {0}  {1}" -f $_.Id, $_.Path) -ForegroundColor Red }
+    Write-Host "Para encerrar todos:" -ForegroundColor Yellow
+    Write-Host "  Get-Process | Where-Object { `$_.Path -like ""*\dist\BTC Monitor\*"" } | Stop-Process -Force" -ForegroundColor Yellow
+    exit 1
 }
 
 Push-Location $raiz

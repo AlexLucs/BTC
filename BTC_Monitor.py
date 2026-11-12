@@ -24,6 +24,9 @@ import webview  # noqa: E402
 
 import topo_janela  # noqa: E402
 from alertas_store import AlertasInvalidosError, RepositorioAlertas  # noqa: E402
+from primeiro_preco import BuscaPrimeiroPreco  # noqa: E402
+from servidor_local import PORTA as PORTA_LOCAL  # noqa: E402
+from servidor_local import criar_aplicativo  # noqa: E402
 
 # Medição de desempenho: presente no código-fonte e no build com -ComMedicao; o build de
 # produção exclui o módulo metricas (ver "BTC Monitor.spec") e tudo vira operação vazia.
@@ -59,6 +62,17 @@ class _SemMedicao:
 
 METRICAS = RegistroMetricas(PASTA_DADOS, _INICIO_PERF, _INICIO_EPOCH) if MEDICAO_ATIVA else _SemMedicao()
 METRICAS.marcar("imports_concluidos")
+
+# 1º preço buscado pelo Python durante a abertura (ver primeiro_preco.py); a página o
+# recebe em /preco-inicial (ver servidor_local.py).
+BUSCA_PRIMEIRO_PRECO = BuscaPrimeiroPreco(METRICAS)
+# Só na medição: tools/medir_abertura.py --comparar preco-python liga esta variável em
+# metade das aberturas, e o Python não busca o preço (a página fica só com o REST).
+VARIAVEL_SEM_PRECO_PYTHON = "BTC_SEM_PRECO_PYTHON"
+
+
+def deve_buscar_preco_pelo_python() -> bool:
+    return not (MEDICAO_ATIVA and os.getenv(VARIAVEL_SEM_PRECO_PYTHON) == "1")
 
 
 def configurar_log() -> None:
@@ -319,11 +333,50 @@ def opcoes_de_armazenamento() -> dict:
     return {"private_mode": False, "storage_path": str(PASTA_WEBVIEW)}
 
 
+# Só na medição: tools/medir_abertura.py --comparar preconnect liga esta variável em metade
+# das aberturas, e a página é servida sem as dicas de pré-conexão do <head>.
+VARIAVEL_SEM_PRECONNECT = "BTC_SEM_PRECONNECT"
+# Idem para --comparar preload-fonte: o servidor local não ajusta o preload da fonte.
+VARIAVEL_SEM_AJUSTE_PRELOAD = "BTC_SEM_AJUSTE_PRELOAD"
+# Idem para --comparar tipos-fixos: o servidor local deixa o bottle adivinhar o tipo de
+# cada arquivo (mimetypes, que lê o registro do Windows na 1ª vez).
+VARIAVEL_SEM_TIPOS_FIXOS = "BTC_SEM_TIPOS_FIXOS"
+# Idem para --comparar preco-no-html: o 1º preço não vai dentro do HTML (só /preco-inicial).
+VARIAVEL_SEM_PRECO_NO_HTML = "BTC_SEM_PRECO_NO_HTML"
+
+
+def recurso_desligado_na_medicao(variavel: str) -> bool:
+    """As variáveis BTC_SEM_* só valem com a medição ativa; a produção as ignora."""
+    return MEDICAO_ATIVA and os.getenv(variavel) == "1"
+
+
+def remover_preconnect(html: str) -> str:
+    """Tira do HTML as linhas com <link rel="preconnect"> ou <link rel="dns-prefetch">."""
+    dicas = ('rel="preconnect"', 'rel="dns-prefetch"')
+    return "".join(linha for linha in html.splitlines(keepends=True)
+                   if not (linha.lstrip().startswith("<link") and any(d in linha for d in dicas)))
+
+
+def html_da_pagina() -> str:
+    """HTML entregue em "/" pelo servidor local (sem as dicas de pré-conexão, se a medição pedir)."""
+    html = (PASTA_RECURSOS / "index.html").read_text(encoding="utf-8")
+    if MEDICAO_ATIVA and os.getenv(VARIAVEL_SEM_PRECONNECT) == "1":
+        return remover_preconnect(html)
+    return html
+
+
 def abrir_janela() -> None:
     index = PASTA_RECURSOS / "index.html"
     if not index.is_file():
         logger.error("index.html não encontrado em %s", PASTA_RECURSOS)
         return
+    aplicativo = criar_aplicativo(
+        PASTA_RECURSOS, html_da_pagina, BUSCA_PRIMEIRO_PRECO,
+        ajustar_preload=not recurso_desligado_na_medicao(VARIAVEL_SEM_AJUSTE_PRELOAD),
+        tipos_fixos=not recurso_desligado_na_medicao(VARIAVEL_SEM_TIPOS_FIXOS),
+        preco_no_html=not recurso_desligado_na_medicao(VARIAVEL_SEM_PRECO_NO_HTML),
+        marcar=METRICAS.marcar if MEDICAO_ATIVA else None,
+    )
 
     classe_api = ExposedApiComMedicao if MEDICAO_ATIVA else ExposedApi
     api = classe_api(RepositorioAlertas(PASTA_DADOS), METRICAS)
@@ -338,9 +391,12 @@ def abrir_janela() -> None:
         monitor = monitor_principal(webview.screens)
         x, y = posicao_centralizada(monitor) if monitor else (None, None)
 
+    # url = aplicativo WSGI: o pywebview o serve em http://127.0.0.1:PORTA_LOCAL/ (a mesma
+    # origem do servidor padrão, então o localStorage é mantido). Ver servidor_local.py.
     janela = webview.create_window(
         WINDOW_TITLE,
-        str(index),
+        aplicativo,
+        http_port=PORTA_LOCAL,
         width=WINDOW_WIDTH,
         height=WINDOW_HEIGHT,
         frameless=True,
@@ -366,6 +422,9 @@ def abrir_janela() -> None:
 
 
 def main() -> None:
+    # Primeiro de tudo: a requisição corre em paralelo com o .NET e o WebView2.
+    if deve_buscar_preco_pelo_python():
+        BUSCA_PRIMEIRO_PRECO.iniciar()
     configurar_log()
     METRICAS.marcar("log_configurado")
     try:

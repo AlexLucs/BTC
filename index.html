@@ -7,7 +7,10 @@
         CSP: restringe de onde vêm scripts, estilos e conexões.
         - 'unsafe-eval' é exigido pelo pywebview (api.js monta a ponte JS→Python com new Function).
         - 'unsafe-inline' em style-src: pywebview e TradingView injetam <style>.
-        - file: cobre o carregamento local do app (index.html aberto por caminho absoluto).
+        - file: cobre a página aberta direto do disco (navegador e testes); o app a serve
+          por http://127.0.0.1:42001 (servidor_local.py).
+        - 'self' em connect-src: o 1º preço buscado pelo Python vem do servidor local
+          (http://127.0.0.1:42001/preco-inicial, ver servidor_local.py).
         Ao trocar de API ou de widget, atualize connect-src / script-src / frame-src.
     -->
     <meta http-equiv="Content-Security-Policy" content="
@@ -17,17 +20,31 @@
         font-src 'self' file:;
         img-src 'self' file: data:;
         media-src 'self' file:;
-        connect-src https://api.binance.com wss://stream.binance.com:9443 https://economia.awesomeapi.com.br https://mempool.space;
+        connect-src 'self' https://api.binance.com wss://stream.binance.com:9443 https://economia.awesomeapi.com.br https://mempool.space;
         frame-src https://*.tradingview.com https://*.tradingview-widget.com;
         base-uri 'none';
         form-action 'none'">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link id="favicon" rel="icon" href="btc-logo.svg">
     <title>BTC Status - Monitoramento de Preço do Bitcoin</title>
+    <!-- Pré-conexão: DNS + TCP + TLS com os servidores começam durante a leitura do HTML,
+         antes de script.js pedir os dados. O Chromium aceita a dica se alguma diretiva da
+         CSP acima permitir o endereço. "crossorigin" nas APIs: o fetch() entre origens usa
+         conexões sem credenciais, e só a pré-conexão do mesmo tipo é aproveitada; o script
+         do TradingView é carregado com credenciais, por isso vai sem o atributo.
+         O WebSocket não reaproveita a conexão HTTP: para ele, só a resolução de DNS.
+         Cada dica fica numa linha só (tools/medir_abertura.py --comparar-preconnect
+         as remove para medir a diferença). -->
+    <link rel="preconnect" href="https://api.binance.com" crossorigin>
+    <link rel="preconnect" href="https://economia.awesomeapi.com.br" crossorigin>
+    <link rel="preconnect" href="https://mempool.space" crossorigin>
+    <link rel="preconnect" href="https://s3.tradingview.com">
+    <link rel="dns-prefetch" href="https://stream.binance.com">
     <!-- A fonte começa a ser lida junto com o HTML: o "load" da página (que libera a ponte
-         do pywebview) espera por ela. SEM "crossorigin": a página é aberta por file:// e,
-         nesse caso, o Chromium só aproveita o preload sem o atributo (com ele, avisa que o
-         modo de credenciais não confere e lê a fonte duas vezes). -->
+         do pywebview) espera por ela. Aqui vai SEM "crossorigin", que é o certo por file://
+         (navegador e testes). No app a página vem por http e servidor_local.py acrescenta o
+         atributo; sem ele, por http, o Chromium descarta o preload e lê a fonte duas vezes.
+         Não mudar esta linha sem mudar PRELOAD_FONTE em servidor_local.py. -->
     <link rel="preload" href="Roboto.woff2" as="font" type="font/woff2">
     <link rel="stylesheet" href="style.css">
     <script src="metricas.js" defer></script>

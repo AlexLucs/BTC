@@ -52,8 +52,8 @@ const INTERVALO_VERIFICAR_INATIVIDADE = 1000;
 const INTERVALO_SALVAR_ESTADO = 30000;  // no máximo uma gravação do último estado a cada 30 s
 const ESPERA_OCIOSA_GRAFICO = 300;      // prazo máximo do requestIdleCallback que monta o gráfico
 // Geometria do gráfico: o quadro (fundo preto opaco) cobre a tabela de máximas/mínimas/
-// taxas com SOBRA_GRAFICO px a mais de cada lado e começa logo abaixo da data e hora
-// (#info-time), que fica sempre à mostra.
+// taxas com SOBRA_GRAFICO px a mais de cada lado. A borda de cima fica sobre a linha
+// separadora da tabela, então a distância até a data e hora é a mesma de sem o gráfico.
 // A altura segue a proporção original do widget (310/440), mas nunca termina antes da
 // tabela nem passa do fim da janela. O widget usa "autosize" e preenche o quadro.
 const PROPORCAO_GRAFICO = 310 / 440;
@@ -141,6 +141,7 @@ function capturarElementos() {
 		overlay: el('overlay'),
 		grafico: el('grafico'),
 		tabelaInfo: document.querySelector('.bottom-left-info table'),
+		separadorInfo: document.querySelector('.bottom-left-info .separator'),
 		graficoModelo: el('grafico-modelo'),
 		modal: el('modalAlerta'),
 		darkback: el('darkback'),
@@ -256,12 +257,72 @@ function pararCiclos() {
 	liberarWakeLock();
 }
 
+// No app, o Python pede o 1º preço logo ao abrir, antes de a página existir
+// (primeiro_preco.py). O servidor local (servidor_local.py) o entrega dentro do HTML, num
+// bloco de dados, se já o tiver quando a página é pedida; senão, em /preco-inicial. Assim o
+// preço não depende do "load" nem da ponte do pywebview. Vale só para a 1ª consulta.
+const ID_PRECO_NO_HTML = 'preco-inicial';
+const URL_PRECO_INICIAL = '/preco-inicial';
+let precoPythonPendente = isPyWebView && location.protocol === 'http:';
+
+/** Preço que o servidor local pôs no HTML (lido uma vez; o bloco sai da página). */
+function lerPrecoNoHtml() {
+	const bloco = document.getElementById(ID_PRECO_NO_HTML);
+	if (!bloco) return null;
+	bloco.remove();
+	try {
+		const dados = JSON.parse(bloco.textContent);
+		return Array.isArray(dados) ? dados : null;
+	} catch {
+		return null;
+	}
+}
+
+async function buscarPrecoInicial() {
+	Metricas.marcar('preco_inicial_pedido');
+	const resposta = await fetch(URL_PRECO_INICIAL, { signal: sinalRequisicao(), cache: 'no-store' });
+	Metricas.marcar('preco_inicial_resposta');
+	if (resposta.status !== 200) throw new Error(`O Python não tem o 1º preço (HTTP ${resposta.status})`);
+	const dados = await resposta.json();
+	Metricas.marcar('preco_inicial_dados');
+	if (!Array.isArray(dados)) throw new Error('1º preço do Python em formato inesperado');
+	return dados;
+}
+
+/**
+ * Tickers da Binance pelo REST. Na 1ª consulta do app, usa o preço que o Python pôs no
+ * HTML; sem ele, corre /preco-inicial contra o REST e usa o que chegar antes (se os dois
+ * falharem, vale o erro do REST).
+ */
+function buscarTickers() {
+	if (!precoPythonPendente) return buscarJSON(URL_TICKERS);
+	precoPythonPendente = false;
+	const noHtml = lerPrecoNoHtml();
+	if (noHtml) {
+		// Recém-buscado pelo Python: não precisa de REST nem de /preco-inicial.
+		Metricas.marcar('preco_no_html');
+		Metricas.contar('primeiro_preco:html');
+		return Promise.resolve(noHtml);
+	}
+	const rest = buscarJSON(URL_TICKERS);
+	const peloPython = buscarPrecoInicial().then(dados => ({ origem: 'python', dados }));
+	const peloRest = rest.then(dados => ({ origem: 'rest', dados }));
+	return Promise.any([peloPython, peloRest]).then(
+		({ origem, dados }) => {
+			Metricas.contar(`primeiro_preco:${origem}`);
+			return dados;
+		},
+		() => rest,
+	);
+}
+
 async function atualizarPrecos(geracao) {
 	const inicio = performance.now();
 	let porSimbolo = null;
 	let erroRede = null;
 	try {
-		const dados = await buscarJSON(URL_TICKERS);
+		const dados = await buscarTickers();
+		Metricas.marcar('precos_continuacao'); // o código volta a rodar com os dados em mãos
 		if (!Array.isArray(dados)) throw new Error('Resposta da Binance não é uma lista');
 		porSimbolo = new Map(dados.map(item => [item?.symbol, item]));
 	} catch (erro) {
@@ -737,7 +798,7 @@ function observarCargaGrafico(inicio) {
 function posicionarGrafico() {
 	const tabela = ui.tabelaInfo.getBoundingClientRect();
 	if (tabela.width <= 0) return; // conteúdo ainda não exibido
-	const topo = Math.ceil(Math.max(tabela.top - SOBRA_GRAFICO, ui.horario.getBoundingClientRect().bottom));
+	const topo = Math.round((ui.separadorInfo ?? ui.tabelaInfo).getBoundingClientRect().top);
 	const esquerda = Math.floor(tabela.left - SOBRA_GRAFICO);
 	const largura = Math.ceil(tabela.right + SOBRA_GRAFICO) - esquerda;
 	const alturaMinima = Math.ceil(tabela.bottom + SOBRA_GRAFICO) - topo; // cobre até o fim da tabela

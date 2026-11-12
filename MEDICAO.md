@@ -77,6 +77,31 @@ A 1ª execução é a abertura "fria" e costuma ser mais lenta. O app é fechado
 
 Compara as portas 9443 e 443 do stream, alternando a ordem entre elas. Mostra o tempo de conexão e o tempo até a 1ª mensagem. Só vale trocar a porta (em `URL_WS_TICKERS` no `script.js` e no `connect-src` da CSP) se a diferença for grande e se repetir em outra execução.
 
+## 2b'. Thread da página ocupada na abertura
+
+A seção 1b do relatório lista, para cada abertura, os momentos dos primeiros 2 s em que a thread da página ficou ocupada por mais de 15 ms (início em ms desde a criação do processo e duração). O Long Tasks API só registra tarefas acima de 50 ms; aqui um timer encadeado do `metricas.js` mede o intervalo entre execuções. A seção 1 traz também as etapas do 1º preço vindo do Python: pedido a `/preco-inicial`, resposta, dados lidos e a volta do código do preço.
+
+## 2c. Comparar um recurso da abertura (com × sem)
+
+```powershell
+.venv\Scripts\python.exe tools\medir_abertura.py --comparar preconnect --vezes 20
+.venv\Scripts\python.exe tools\medir_abertura.py --comparar preco-python --vezes 20
+```
+
+Alterna aberturas com e sem o recurso (ordem com, sem, sem, com...). Só o app com a medição ativa obedece às variáveis que desligam cada um; a produção as ignora.
+
+| Recurso | Variável | Nas aberturas "sem" |
+|---|---|---|
+| `preconnect` | `BTC_SEM_PRECONNECT=1` | o servidor local (`servidor_local.py`) entrega o `index.html` sem as dicas `<link rel="preconnect">` / `dns-prefetch` |
+| `preco-python` | `BTC_SEM_PRECO_PYTHON=1` | o Python não busca o 1º preço (`/preco-inicial` responde 204); a página fica só com o REST |
+| `preload-fonte` | `BTC_SEM_AJUSTE_PRELOAD=1` | o servidor local entrega o `index.html` sem acrescentar `crossorigin` ao preload da fonte (por http o preload é descartado e a fonte é lida duas vezes) |
+| `tipos-fixos` | `BTC_SEM_TIPOS_FIXOS=1` | o servidor local deixa o bottle adivinhar o tipo de cada arquivo pelo `mimetypes`, que na 1ª vez lê o registro do Windows |
+| `preco-no-html` | `BTC_SEM_PRECO_NO_HTML=1` | o 1º preço não vai dentro do HTML; a página o pede em `/preco-inicial` (correndo contra o REST) |
+
+A tabela final mostra a mediana de cada metade e o ganho (sem − com) das etapas que dependem da rede, a duração da 1ª requisição a cada servidor (`rede1:<servidor>`, também na seção 2 do relatório comum) e de onde veio o 1º preço (`primeiro_preco:python` / `primeiro_preco:rest`). A tabela também mostra quando a fonte chegou e quantas vezes cada arquivo da página foi lido (`recurso_n:<arquivo>`; o ideal é 1). `--comparar-preconnect` continua valendo.
+
+Na seção 1 do relatório comum aparecem, para cada arquivo da própria página (CSS, JS, fonte, ícone), o instante em que foi pedido e o instante em que chegou (`recurso_inicio:<arquivo>` / `recurso:<arquivo>`), junto das outras etapas: é por aí que se vê o que segura o `load`. Do lado do Python, o servidor local registra quando cada pedido chegou e quando terminou de enviar a resposta (`servidor_pedido:<arquivo>` / `servidor_fim:<arquivo>`). Aceita `--exe` com o build `-ComMedicao`.
+
 ## 3. Testes de desempenho (laboratório)
 
 Ficam fora do `python -m pytest tests` e do `criar_exe_btc.ps1`.
