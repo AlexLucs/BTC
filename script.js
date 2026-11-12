@@ -110,7 +110,7 @@ let alarmesSilenciados = false;
 let alertaAberto = false;
 let audioAlerta = null;
 
-let graficoVisivel = true;        // escolha do usuário pelo botão ⇄
+let graficoVisivel = false;       // escolha do usuário pelo botão ⇄ (padrão: atributo "hidden" de #grafico no HTML)
 let fixado = false;
 let monitorarInatividade = true;  // desligado enquanto a janela está fixada no topo
 let ultimaInteracao = Date.now();
@@ -744,10 +744,13 @@ async function enviarMetricas(motivo) {
 	else console.info(`[métricas] ${motivo}`, relatorio);
 }
 
-/** O relatório da abertura sai quando o gráfico carrega ou, no máximo, 15 s após o 1º preço. */
+/**
+ * O relatório da abertura sai quando o gráfico carrega ou, no máximo, 15 s após o 1º preço.
+ * Com o gráfico oculto (padrão), sai já no 1º preço: não há gráfico para esperar.
+ */
 function enviarRelatorioAbertura(forcar = false) {
 	if (relatorioAberturaEnviado || !carregado) return;
-	if (!forcar && !('grafico_carregado' in Metricas.marcos)) return;
+	if (!forcar && graficoVisivel && !('grafico_carregado' in Metricas.marcos)) return;
 	relatorioAberturaEnviado = true;
 	enviarMetricas('abertura');
 }
@@ -764,6 +767,7 @@ function enviarRelatorioAbertura(forcar = false) {
 function atualizarGrafico() {
 	const mostrar = graficoVisivel && ativo;
 	ui.grafico.style.display = mostrar ? 'flex' : 'none';
+	ui.grafico.hidden = !mostrar; // mantém o atributo do HTML coerente com o que está na tela
 	if (!mostrar) {
 		observadorGrafico?.disconnect();
 		ui.grafico.replaceChildren();
@@ -1355,6 +1359,7 @@ function registrarEventos() {
 document.addEventListener('DOMContentLoaded', () => {
 	Metricas.marcar('dom_pronto');
 	capturarElementos();
+	graficoVisivel = !ui.grafico.hidden; // padrão de abertura vem do index.html
 	registrarEventos();
 	configurarBotoesJanela();
 	restaurarEstadoSalvo(); // antes das requisições: a tela já abre com os últimos valores

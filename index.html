@@ -69,8 +69,10 @@
 
         <!-- Gráfico de candles BTC/BRL (widget externo do TradingView).
              O widget fica no <template> e só é montado em #grafico enquanto está visível
-             e o monitoramento está ativo (script.js: atualizarGrafico). -->
-        <div id="grafico" class="grafico" title="Gráfico"></div>
+             e o monitoramento está ativo (script.js: atualizarGrafico).
+             O atributo "hidden" define o padrão ao abrir: com ele, o gráfico começa oculto
+             (nada do TradingView é carregado até o clique em ⇄); sem ele, começa visível. -->
+        <div id="grafico" class="grafico" title="Gráfico" hidden></div>
         <template id="grafico-modelo">
             <div class="tradingview-widget-container">
                 <div class="tradingview-widget-container__widget"></div>
