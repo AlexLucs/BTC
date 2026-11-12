@@ -7,6 +7,9 @@ Usa o Microsoft Edge instalado (mesmo motor Chromium do WebView2). Mede:
   pelas amostras do metricas.js;
 - gráfico e tela de alertas: montar/desmontar o widget e abrir a tabela.
 
+O gráfico abre oculto (atributo "hidden" de #grafico no index.html): a abertura e os
+ciclos são medidos sem ele, como no uso padrão; o teste do gráfico o abre pelo ⇄.
+
 Para acelerar, um script injetado divide por ACELERACAO toda espera de setTimeout
 de 1 s ou mais. A lógica é a mesma; só as pausas entre ciclos ficam curtas.
 Com BTC_REDE_REAL=1 a rede não é simulada (os tempos passam a incluir a internet).
@@ -48,22 +51,18 @@ def test_abertura(navegador, coletor):
         contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=False, com_alertas=True)
         pagina.goto(INDEX_URL)
         esperar_carregamento(pagina)
-        try:
-            pagina.wait_for_function("'grafico_carregado' in Metricas.marcos", timeout=15000)
-        except sync_api.TimeoutError:
-            pass  # sem gráfico (rede real lenta): os demais marcos continuam válidos
+        # O gráfico abre oculto: a abertura termina no "load" (não há gráfico para esperar).
+        pagina.wait_for_function("'nav_load' in Metricas.marcos", timeout=15000)
         marcos = pagina.evaluate("Metricas.marcos")
         assert not erros, erros
         contexto.close()
-        if "grafico_carregado" in marcos:
-            # O gráfico é montado depois do "load": o iframe não pode atrasar a ponte do pywebview.
-            assert marcos["nav_load"] < marcos["grafico_carregado"], marcos
+        assert "grafico_carregado" not in marcos, marcos  # nada do TradingView na abertura padrão
         for nome, valor in marcos.items():
             marcos_por_nome.setdefault(nome, []).append(valor)
 
     sufixo = " [rede real]" if REDE_REAL else ""
     for nome in ("nav_resposta_fim", "script_inicio", "primeiro_quadro", "first-contentful-paint", "dom_pronto", "nav_load", "conteudo_visivel",
-                 "inicializacao_js_concluida", "primeira_resposta_binance", "primeiro_preco", "grafico_carregado"):
+                 "inicializacao_js_concluida", "primeira_resposta_binance", "primeiro_preco"):
         if nome in marcos_por_nome:
             coletor.registrar(f"página/abertura{sufixo}: {nome} (mediana)", statistics.median(marcos_por_nome[nome]))
     if not REDE_REAL:
@@ -75,7 +74,7 @@ def test_ciclos_de_preco(navegador, coletor):
     contexto, pagina, erros = nova_pagina(navegador, rede, acelerar=True, com_alertas=True)
     pagina.goto(INDEX_URL)
     esperar_carregamento(pagina)
-    pagina.wait_for_timeout(1000)  # deixa o gráfico e a 1ª rodada assentarem
+    pagina.wait_for_timeout(1000)  # deixa a 1ª rodada assentar (o gráfico abre oculto)
 
     cdp = contexto.new_cdp_session(pagina)
     cdp.send("Performance.enable")
@@ -217,6 +216,8 @@ def test_grafico_e_tela_de_alertas(navegador, coletor):
     contexto, pagina, erros = nova_pagina(navegador, rede, acelerar=True, com_alertas=True)
     pagina.goto(INDEX_URL)
     esperar_carregamento(pagina)
+    pagina.click("#grafico-btn")  # o gráfico abre oculto: mostra antes de medir
+    pagina.wait_for_function("document.querySelector('#grafico iframe') !== null")
     pagina.wait_for_timeout(500)
     cdp = contexto.new_cdp_session(pagina)
     cdp.send("Performance.enable")
@@ -301,7 +302,8 @@ def test_relatorio_da_pagina_chega_ao_python(navegador, tmp_path):
     assert not erros, erros
     assert recebidos and recebidos[0]["motivo"] == "abertura"
     marcos = recebidos[0]["marcos"]
-    for nome in ("script_inicio", "dom_pronto", "api_python_pronta", "alertas_sincronizados", "primeiro_preco", "grafico_carregado"):
+    # O gráfico abre oculto: a abertura termina com os alertas lidos (sem grafico_carregado).
+    for nome in ("script_inicio", "dom_pronto", "api_python_pronta", "alertas_sincronizados", "primeiro_preco"):
         assert nome in marcos, nome
     assert "python:carregar_alerta" in recebidos[0]["amostras"]
 
