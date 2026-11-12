@@ -725,7 +725,7 @@ function concluirCarregamento() {
 	mostrarConteudo();
 	silenciarAlarmes(SILENCIO_APOS_CARREGAR); // evita disparo imediato ao abrir
 	Metricas.marcar('primeiro_preco');
-	enviarRelatorioAbertura(); // se o gráfico já carregou, o relatório sai agora
+	enviarRelatorioAbertura(); // se a abertura já terminou (ver aberturaConcluida), o relatório sai agora
 	setTimeout(() => enviarRelatorioAbertura(true), ESPERA_MAX_RELATORIO_ABERTURA);
 	setInterval(() => enviarMetricas('periodico'), INTERVALO_RELATORIO_METRICAS);
 }
@@ -744,13 +744,24 @@ async function enviarMetricas(motivo) {
 	else console.info(`[métricas] ${motivo}`, relatorio);
 }
 
+let sincronizacaoAlertasConcluida = false; // no app, carregar_alerta já respondeu (ou falhou)
+
 /**
- * O relatório da abertura sai quando o gráfico carrega ou, no máximo, 15 s após o 1º preço.
- * Com o gráfico oculto (padrão), sai já no 1º preço: não há gráfico para esperar.
+ * A abertura terminou: o relatório pode ser montado. Metricas.relatorio zera os dados ao
+ * montar, então tudo o que for marcado depois só aparece no relatório seguinte.
+ * - gráfico visível: quando ele carrega;
+ * - gráfico oculto, no app: quando os alertas foram lidos do disco (logo depois da ponte);
+ * - gráfico oculto, no navegador: depois do "load".
  */
+function aberturaConcluida() {
+	if (graficoVisivel) return 'grafico_carregado' in Metricas.marcos;
+	return isPyWebView ? sincronizacaoAlertasConcluida : document.readyState === 'complete';
+}
+
+/** O relatório da abertura sai quando a abertura termina ou, no máximo, 15 s após o 1º preço. */
 function enviarRelatorioAbertura(forcar = false) {
 	if (relatorioAberturaEnviado || !carregado) return;
-	if (!forcar && graficoVisivel && !('grafico_carregado' in Metricas.marcos)) return;
+	if (!forcar && !aberturaConcluida()) return;
 	relatorioAberturaEnviado = true;
 	enviarMetricas('abertura');
 }
@@ -1117,21 +1128,27 @@ function gravarAlertas(lista) {
 
 /** No app, o arquivo em disco é a fonte da verdade. */
 async function sincronizarAlertas() {
-	const doDisco = await chamarApi('carregar_alerta');
-	if (!Array.isArray(doDisco)) {
-		// null = arquivo ilegível ou corrompido (o Python guarda uma cópia .bak); undefined = falha na chamada.
-		if (doDisco === null) {
-			aviso('FALHA', 'O arquivo de alertas estava corrompido. Uma cópia .bak foi salva em %APPDATA%\\btcstatus.');
-		} else {
-			aviso('FALHA', 'Não foi possível carregar os alertas salvos.');
+	try {
+		const doDisco = await chamarApi('carregar_alerta');
+		if (!Array.isArray(doDisco)) {
+			// null = arquivo ilegível ou corrompido (o Python guarda uma cópia .bak); undefined = falha na chamada.
+			if (doDisco === null) {
+				aviso('FALHA', 'O arquivo de alertas estava corrompido. Uma cópia .bak foi salva em %APPDATA%\\btcstatus.');
+			} else {
+				aviso('FALHA', 'Não foi possível carregar os alertas salvos.');
+			}
+			return;
 		}
-		return;
+		const { alertas: lista, alterado } = normalizarLista(doDisco);
+		alertas = lista;
+		Metricas.marcar('alertas_sincronizados');
+		if (alterado) persistirEmDisco(alertas); // migração de formato antigo
+		if (modalAlertaAberto()) renderizarTabelaAlertas();
+	} finally {
+		// Com ou sem sucesso: é o último passo da abertura no app (ver aberturaConcluida).
+		sincronizacaoAlertasConcluida = true;
+		enviarRelatorioAbertura();
 	}
-	const { alertas: lista, alterado } = normalizarLista(doDisco);
-	alertas = lista;
-	Metricas.marcar('alertas_sincronizados');
-	if (alterado) persistirEmDisco(alertas); // migração de formato antigo
-	if (modalAlertaAberto()) renderizarTabelaAlertas();
 }
 
 // ---------------------------------------------------------------------------
@@ -1309,6 +1326,7 @@ function aposCarregarPagina() {
 	const montar = () => quandoOcioso(atualizarGrafico, ESPERA_OCIOSA_GRAFICO);
 	if (isPyWebView) obterApi().catch(() => {}).finally(montar);
 	else montar();
+	enviarRelatorioAbertura(); // no navegador, a abertura termina no "load" (ver aberturaConcluida)
 }
 
 function quandoOcioso(funcao, prazoMs) {
