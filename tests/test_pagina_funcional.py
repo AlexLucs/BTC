@@ -613,8 +613,19 @@ def abrir_pelo_servidor(navegador, busca, segurar_binance: bool = False, falhar_
     return servidor, rede, contexto, pagina, erros
 
 
+def _esperar_relatorio_de_abertura(pagina) -> None:
+    """O relatório de abertura é montado no 1º preço (e zera os contadores nesse instante), mas
+    só chega ao registrar_metricas depois da ponte. Até lá, os contadores não estão em lugar nenhum."""
+    pagina.wait_for_function(
+        "typeof window.__relatorios === 'undefined' || !carregado"
+        " || window.__relatorios.some(r => r.motivo === 'abertura')",
+        timeout=10000,
+    )
+
+
 def contadores(pagina) -> dict:
     """Contadores da página somados aos dos relatórios já enviados (cada relatório os zera)."""
+    _esperar_relatorio_de_abertura(pagina)
     return pagina.evaluate("""() => {
         const soma = {};
         for (const c of [...(window.__relatorios ?? []).map(r => r.contadores ?? {}), Metricas.resumo().contadores]) {
@@ -626,6 +637,7 @@ def contadores(pagina) -> dict:
 
 def marcos_da_pagina(pagina) -> dict:
     """Marcos da página junto com os dos relatórios já enviados (caso um relatório os tenha zerado)."""
+    _esperar_relatorio_de_abertura(pagina)
     return pagina.evaluate("""() => Object.assign({},
         ...(window.__relatorios ?? []).map(r => r.marcos ?? {}), Metricas.marcos)""")
 
