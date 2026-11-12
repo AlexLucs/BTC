@@ -51,6 +51,18 @@ window.addEventListener('load', () => setTimeout(() => {
 """
 
 
+# O gráfico começa oculto (atributo "hidden" de #grafico no index.html). Os testes da
+# abertura COM o gráfico tiram o atributo antes de o script.js lê-lo: o listener do init
+# script é registrado antes do script.js e roda primeiro no DOMContentLoaded.
+MOSTRAR_GRAFICO_AO_ABRIR = """
+document.addEventListener('DOMContentLoaded', () => { document.getElementById('grafico').hidden = false; });
+"""
+
+
+def com_grafico_ao_abrir(contexto) -> None:
+    contexto.add_init_script(MOSTRAR_GRAFICO_AO_ABRIR)
+
+
 def com_estado_salvo(contexto, estado: dict = ESTADO_SALVO) -> None:
     contexto.add_init_script(f"localStorage.setItem('ultimoEstado', {json.dumps(json.dumps(estado))});")
 
@@ -153,6 +165,7 @@ def test_grafico_espera_a_ponte_do_python(navegador):
     contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=False, com_alertas=False,
                                           user_agent="Mozilla/5.0 pywebview")
     contexto.add_init_script(PYWEBVIEW_TARDIO)
+    com_grafico_ao_abrir(contexto)
     pagina.goto(INDEX_URL)
     pagina.wait_for_function("'nav_load' in Metricas.marcos")
     assert pagina.evaluate("document.getElementById('grafico').childElementCount") == 0  # a ponte vem 300 ms depois
@@ -167,8 +180,31 @@ def test_grafico_aparece_mesmo_sem_ponte_do_python(navegador):
     # Sem a ponte, o gráfico é montado ao fim do prazo da API (5 s, acelerado aqui).
     contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=True, com_alertas=False,
                                           user_agent="Mozilla/5.0 pywebview")
+    com_grafico_ao_abrir(contexto)
     pagina.goto(INDEX_URL)
     pagina.wait_for_function("document.querySelector('#grafico iframe') !== null", timeout=10000)
+    assert not erros, erros
+    contexto.close()
+
+
+def test_grafico_comeca_oculto_e_nada_do_tradingview_e_carregado(navegador):
+    """Padrão do index.html: o gráfico abre oculto e o TradingView só é pedido ao clicar em ⇄."""
+    contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=False, com_alertas=False,
+                                          user_agent="Mozilla/5.0 pywebview")
+    contexto.add_init_script(PYWEBVIEW_TARDIO)
+    pedidos: list[str] = []
+    pagina.on("request", lambda pedido: pedidos.append(pedido.url))
+    pagina.goto(INDEX_URL)
+    esperar_carregamento(pagina)
+    pagina.wait_for_function("'api_python_pronta' in Metricas.marcos")  # quando o gráfico seria montado
+    pagina.wait_for_timeout(1000)
+    assert pagina.evaluate("document.getElementById('grafico').childElementCount") == 0
+    assert pagina.evaluate("getComputedStyle(document.getElementById('grafico')).display") == "none"
+    assert pagina.evaluate("document.getElementById('grafico').hidden") is True
+    assert not any("tradingview" in url for url in pedidos), pedidos
+    pagina.click("#grafico-btn")
+    pagina.wait_for_function("document.querySelector('#grafico iframe') !== null", timeout=10000)
+    assert pagina.evaluate("document.getElementById('grafico').hidden") is False
     assert not erros, erros
     contexto.close()
 
@@ -363,6 +399,7 @@ def test_pagina_de_producao_funciona_com_o_substituto_vazio(navegador, tmp_path)
             return nome === 'carregar_alerta' ? [] : (nome === 'esta_no_topo' ? false : true);
         } }) };
     """)
+    com_grafico_ao_abrir(contexto)
     pagina.goto((tmp_path / "index.html").as_uri())
     esperar_carregamento(pagina)
     estabilizar_websocket(rede, pagina, 600_000)
@@ -379,7 +416,8 @@ def test_pagina_de_producao_funciona_com_o_substituto_vazio(navegador, tmp_path)
 
 
 def test_navegador_mostra_e_oculta_o_grafico(navegador):
-    """No navegador aparecem Alertas, Gráfico (⇄) e Pausar, sem sobreposição; ⇄ alterna o gráfico."""
+    """No navegador aparecem Alertas, Gráfico (⇄) e Pausar, sem sobreposição; o gráfico abre
+    oculto e ⇄ o mostra e o oculta."""
     contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=False, com_alertas=False)
     pagina.goto(INDEX_URL)
     esperar_carregamento(pagina)
@@ -389,6 +427,11 @@ def test_navegador_mostra_e_oculta_o_grafico(navegador):
     for esquerda, direita in zip(caixas, caixas[1:]):
         assert esquerda["x"] + esquerda["width"] <= direita["x"], caixas  # lado a lado, sem sobrepor
 
+    pagina.wait_for_function("'nav_load' in Metricas.marcos")
+    pagina.wait_for_timeout(500)  # passa o momento em que o gráfico seria montado
+    assert pagina.evaluate("document.getElementById('grafico').childElementCount") == 0
+    assert pagina.evaluate("getComputedStyle(document.getElementById('grafico')).display") == "none"
+    pagina.click("#grafico-btn")
     pagina.wait_for_function("document.querySelector('#grafico iframe') !== null", timeout=10000)
     pagina.click("#grafico-btn")
     assert pagina.evaluate("document.getElementById('grafico').childElementCount") == 0
@@ -422,9 +465,11 @@ def conferir_cobertura(medida, altura_janela):
 
 
 def test_grafico_na_janela_do_app_fica_como_sempre(navegador):
+    """Aberto pelo ⇄ (o padrão é oculto), o gráfico fica na mesma posição de sempre."""
     contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=False, com_alertas=False)
     pagina.goto(INDEX_URL)
     esperar_carregamento(pagina)
+    pagina.click("#grafico-btn")
     pagina.wait_for_function("document.querySelector('#grafico iframe') !== null", timeout=10000)
     medida = pagina.evaluate(GEOMETRIA)
     assert medida["quadro"] == [24, 449, 476, 767], medida  # 500x810: sobre a linha separadora
@@ -444,6 +489,7 @@ def test_grafico_cobre_a_tabela_em_varios_tamanhos(navegador, largura, altura):
     rede.segurar_binance = True
     contexto = navegador.new_context(viewport={"width": largura, "height": altura})
     rede.instalar(contexto)
+    com_grafico_ao_abrir(contexto)
     pagina = contexto.new_page()
     erros: list[str] = []
     pagina.on("pageerror", lambda erro: erros.append(str(erro)))
@@ -483,6 +529,7 @@ def test_relatorio_de_abertura_traz_a_1a_requisicao_a_cada_servidor(navegador):
     contexto, pagina, erros = nova_pagina(navegador, rede, acelerar=False, com_alertas=False,
                                           user_agent="Mozilla/5.0 pywebview")
     contexto.add_init_script(CAPTURAR_RELATORIOS)
+    com_grafico_ao_abrir(contexto)
     pagina.goto(INDEX_URL)
     pagina.wait_for_function("document.querySelector('#grafico iframe') !== null", timeout=10000)
     pagina.wait_for_timeout(300)
@@ -494,6 +541,21 @@ def test_relatorio_de_abertura_traz_a_1a_requisicao_a_cada_servidor(navegador):
     assert "primeiro_preco" in abertura["marcos"], abertura["marcos"]
     assert "rede1:api.binance.com" in amostras, sorted(amostras)
     assert len(amostras["rede1:api.binance.com"]) == 1
+    assert not erros, erros
+    contexto.close()
+
+
+def test_relatorio_de_abertura_nao_espera_o_grafico_oculto(navegador):
+    """Com o gráfico oculto (padrão), o relatório sai no 1º preço, sem esperar os 15 s."""
+    contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=False, com_alertas=False,
+                                          user_agent="Mozilla/5.0 pywebview")
+    contexto.add_init_script(CAPTURAR_RELATORIOS)
+    pagina.goto(INDEX_URL)
+    esperar_carregamento(pagina)
+    pagina.wait_for_function("window.__relatorios.some(r => r.motivo === 'abertura')", timeout=5000)
+    abertura = pagina.evaluate("window.__relatorios.find(r => r.motivo === 'abertura')")
+    assert "primeiro_preco" in abertura["marcos"], abertura["marcos"]
+    assert "grafico_carregado" not in abertura["marcos"], abertura["marcos"]
     assert not erros, erros
     contexto.close()
 
