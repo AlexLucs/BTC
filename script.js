@@ -51,6 +51,13 @@ const LIMITE_INATIVIDADE = 1000 * 1000; // ~17 min sem mouse/teclado pausa o mon
 const INTERVALO_VERIFICAR_INATIVIDADE = 1000;
 const INTERVALO_SALVAR_ESTADO = 30000;  // no máximo uma gravação do último estado a cada 30 s
 const ESPERA_OCIOSA_GRAFICO = 300;      // prazo máximo do requestIdleCallback que monta o gráfico
+// Geometria do gráfico: o quadro (fundo preto opaco) cobre a tabela de máximas/mínimas/
+// taxas com SOBRA_GRAFICO px a mais de cada lado e começa logo abaixo da data e hora
+// (#info-time), que fica sempre à mostra.
+// A altura segue a proporção original do widget (310/440), mas nunca termina antes da
+// tabela nem passa do fim da janela. O widget usa "autosize" e preenche o quadro.
+const PROPORCAO_GRAFICO = 310 / 440;
+const SOBRA_GRAFICO = 2;
 const INTERVALO_RELATORIO_METRICAS = 5 * 60 * 1000;
 const ESPERA_MAX_RELATORIO_ABERTURA = 15000; // após o 1º preço, se o gráfico não carregar antes
 const MAX_FALHAS = 10;             // falhas seguidas da cotação BTC/BRL antes de pausar
@@ -133,6 +140,7 @@ function capturarElementos() {
 		taxas: Object.fromEntries(CAMPOS_TAXA.map(campo => [campo, el(campo)])),
 		overlay: el('overlay'),
 		grafico: el('grafico'),
+		tabelaInfo: document.querySelector('.bottom-left-info table'),
 		graficoModelo: el('grafico-modelo'),
 		modal: el('modalAlerta'),
 		darkback: el('darkback'),
@@ -699,6 +707,7 @@ function atualizarGrafico() {
 		observadorGrafico?.disconnect();
 		ui.grafico.replaceChildren();
 	} else if (!ui.grafico.firstElementChild) {
+		posicionarGrafico();
 		const inicio = performance.now();
 		Metricas.contar('grafico:montagens');
 		observarCargaGrafico(inicio);
@@ -722,6 +731,34 @@ function observarCargaGrafico(inicio) {
 		}, { once: true });
 	});
 	observadorGrafico.observe(ui.grafico, { childList: true, subtree: true });
+}
+
+/** Põe o gráfico sobre a tabela de máximas/mínimas/taxas, cobrindo-a por inteiro. */
+function posicionarGrafico() {
+	const tabela = ui.tabelaInfo.getBoundingClientRect();
+	if (tabela.width <= 0) return; // conteúdo ainda não exibido
+	const topo = Math.ceil(Math.max(tabela.top - SOBRA_GRAFICO, ui.horario.getBoundingClientRect().bottom));
+	const esquerda = Math.floor(tabela.left - SOBRA_GRAFICO);
+	const largura = Math.ceil(tabela.right + SOBRA_GRAFICO) - esquerda;
+	const alturaMinima = Math.ceil(tabela.bottom + SOBRA_GRAFICO) - topo; // cobre até o fim da tabela
+	const altura = Math.min(Math.max(Math.round(largura * PROPORCAO_GRAFICO), alturaMinima), window.innerHeight - topo);
+	Object.assign(ui.grafico.style, { top: `${topo}px`, left: `${esquerda}px`, width: `${largura}px`, height: `${altura}px` });
+}
+
+let reposicionamentoPendente = false;
+
+/**
+ * Reposiciona no próximo quadro (várias mudanças seguidas viram um só cálculo).
+ * Chamado pelo ResizeObserver do bloco de informações: a tabela desce quando os textos
+ * acima dela são preenchidos (1º preço, "Sem Dados") e quando a janela muda de tamanho.
+ */
+function aoRedimensionar() {
+	if (reposicionamentoPendente || !ui.grafico.firstElementChild) return;
+	reposicionamentoPendente = true;
+	requestAnimationFrame(() => {
+		reposicionamentoPendente = false;
+		if (ui.grafico.firstElementChild) posicionarGrafico();
+	});
 }
 
 function alternarGrafico() {
@@ -897,14 +934,15 @@ function configurarBotoesJanela() {
 		for (const botao of document.querySelectorAll('.btns')) botao.style.display = 'flex';
 		return;
 	}
-	// No navegador só fazem sentido Pausar e Alertas.
-	const pausarBtn = el('pausar-btn');
-	pausarBtn.style.left = 'unset';
-	pausarBtn.style.right = '0px';
-	pausarBtn.style.display = 'flex';
-	const alertaBtn = el('alerta-btn');
-	alertaBtn.style.left = '0px';
-	alertaBtn.style.display = 'flex';
+	// No navegador só fazem sentido Alertas, Gráfico e Pausar (os demais controlam a janela do app).
+	const posicoes = {
+		'alerta-btn': { left: '0px' },
+		'grafico-btn': { left: '40px' },
+		'pausar-btn': { left: 'unset', right: '0px' },
+	};
+	for (const [id, posicao] of Object.entries(posicoes)) {
+		Object.assign(el(id).style, posicao, { display: 'flex' });
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1249,6 +1287,8 @@ function registrarEventos() {
 		else if (ativo) adquirirWakeLock();
 	});
 	window.addEventListener('pagehide', () => gravarEstado(true));
+	if (typeof ResizeObserver === 'function') new ResizeObserver(aoRedimensionar).observe(el('conteudoMenosBotoes'));
+	else window.addEventListener('resize', aoRedimensionar, { passive: true });
 }
 
 document.addEventListener('DOMContentLoaded', () => {

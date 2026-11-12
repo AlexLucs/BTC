@@ -309,16 +309,24 @@ input[type="number"]::-webkit-inner-spin-button {
 /* ---------------------------------------------------------------------------
    Gráfico
    --------------------------------------------------------------------------- */
+/* Posição e tamanho vêm de script.js (posicionarGrafico): o quadro cobre a tabela de
+   máximas/mínimas/taxas. O fundo opaco esconde a tabela mesmo nas bordas do widget. */
 #grafico {
     position: fixed;
-    top: 437px;
-    left: 5%;
-    right: 5%;
+    top: 444px; /* valores da janela do app (500x810) */
+    left: 24px;
+    width: 452px;
+    height: 318px;
     z-index: 2;
     display: none; /* script.js (atualizarGrafico) exibe e monta o widget */
-    flex-direction: column;
-    justify-content: center;
-    align-items: center;
+    background-color: var(--fundo);
+}
+
+/* "autosize" do widget: ele ocupa 100% do elemento pai, que precisa de altura definida. */
+#grafico .tradingview-widget-container,
+#grafico .tradingview-widget-container__widget {
+    width: 100%;
+    height: 100%;
 }
 
 /* ---------------------------------------------------------------------------
