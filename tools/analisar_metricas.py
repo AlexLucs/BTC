@@ -41,6 +41,7 @@ ETAPAS_ABERTURA = [
     ("py", "evento_initialized", "Evento initialized"),
     ("py", "evento_before_show", "Evento before_show"),
     ("py", "evento_shown", "Janela exibida (shown)"),
+    ("py", "tamanho_ajustado", "Tamanho da janela corrigido (moldura do frameless)"),
     ("js", "navegacao", "Página começa a carregar (timeOrigin)"),
     ("js", "nav_resposta_fim", "index.html recebido"),
     ("js", "script_inicio", "metricas.js/script.js começam"),
