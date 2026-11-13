@@ -65,6 +65,8 @@
             <button type="button" class="btns" id="minimize-btn" title="Minimizar" aria-label="Minimizar">_</button>
             <button type="button" class="btns" id="close-btn" title="Fechar" aria-label="Fechar">x</button>
             <button type="button" class="btns" id="grafico-btn" title="Mostrar/ocultar gráfico" aria-label="Mostrar ou ocultar gráfico">⇄</button>
+            <!-- Modo compacto: ⊟ compacta, ⊞ volta ao modo completo (script.js: alternarCompacto) -->
+            <button type="button" class="btns" id="compacto-btn" title="Modo compacto" aria-label="Modo compacto">⊟</button>
         </div>
 
         <!-- Gráfico de candles BTC/BRL (widget externo do TradingView).
@@ -156,10 +158,12 @@
             <div id="info-logo" title="Bitcoin Monitor">₿</div>
             <div id="info-price" class="btc_em_brl_principal" title="Preço atual do Bitcoin em Reais (BRL). Dados da Binance©."></div>
             <div id="info-usdt" class="btc_em_usdt_secundario" title="Preço atual do Bitcoin em dólares (USDT). Dados da Binance©."></div>
-            <div id="info-dolar" class="dolar_btc_e_b3" title="Dólar implícito (BTC/BRL ÷ BTC/USDT, Binance©) | Dólar comercial (AwesomeAPI©)."></div>
+            <!-- Duas partes com fontes diferentes: cada uma fica esmaecida enquanto mostra o valor salvo -->
+            <div id="info-dolar" class="dolar_btc_e_b3" title="Dólar implícito (BTC/BRL ÷ BTC/USDT, Binance©) | Dólar comercial (AwesomeAPI©)."><span id="dolar-implicito"></span> | <span id="dolar-comercial"></span></div>
             <div class="percentual" title="Variação percentual do preço do Bitcoin nas últimas 24 horas.">
                 <span id="info-percent"></span>
-                <span id="info-seta"></span>
+                <!-- Começa com a seta neutra: o número já aparece com ela e não se desloca depois -->
+                <span id="info-seta" class="seta-neutra">↔</span>
             </div>
             <div id="info-time" class="horario_atualizacao" title="Data e hora da última atualização."></div>
 
@@ -208,6 +212,13 @@
                         <tr><td colspan="2"><hr class="separator"></td></tr>
                     </tbody>
                 </table>
+            </div>
+
+            <!-- Rodapé do modo compacto (classe "compacto" no <html>): máxima e mínima de 24 h em
+                 uma linha. Oculto no modo completo, em que a tabela acima mostra os mesmos valores. -->
+            <div id="info-faixa">
+                <span title="Preço máximo do Bitcoin em Reais nas últimas 24 horas. Dados da Binance©."><span class="rotulo">Máxima:</span> <span id="faixaMaxima"></span></span>
+                <span title="Preço mínimo do Bitcoin em Reais nas últimas 24 horas. Dados da Binance©."><span class="rotulo">Mínima:</span> <span id="faixaMinima"></span></span>
             </div>
         </div>
     </div>

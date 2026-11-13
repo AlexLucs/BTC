@@ -39,6 +39,9 @@ MEDICAO_ATIVA = RegistroMetricas is not None
 WINDOW_TITLE = "BTC Status"
 WINDOW_WIDTH = 500
 WINDOW_HEIGHT = 810
+# Modo compacto (style.css: html.compacto): sem logo, tabela e gráfico. A altura deixa
+# abaixo do rodapé (máxima/mínima) a mesma margem que há acima dos botões (12 px).
+WINDOW_HEIGHT_COMPACTA = 388
 
 PASTA_DADOS = Path(os.getenv("APPDATA") or Path.home()) / "btcstatus"
 ARQUIVO_CONFIG = PASTA_DADOS / "BTC Monitor.ini"
@@ -114,36 +117,80 @@ def monitor_no_ponto(x: int, y: int, monitores: list) -> object | None:
     )
 
 
-def posicao_centralizada(monitor) -> tuple[int, int]:
+def altura_da_janela(compacto: bool) -> int:
+    return WINDOW_HEIGHT_COMPACTA if compacto else WINDOW_HEIGHT
+
+
+def posicao_centralizada(monitor, largura: int = WINDOW_WIDTH, altura: int = WINDOW_HEIGHT) -> tuple[int, int]:
     """Calcula o canto superior esquerdo que centraliza a janela no monitor."""
     return (
-        monitor.x + (monitor.width - WINDOW_WIDTH) // 2,
-        monitor.y + (monitor.height - WINDOW_HEIGHT) // 2,
+        monitor.x + (monitor.width - largura) // 2,
+        monitor.y + (monitor.height - altura) // 2,
     )
 
 
-def carregar_posicao() -> tuple[int, int] | None:
-    """Lê a última posição salva, se ela ainda estiver dentro de algum monitor."""
+def posicao_dentro_do_monitor(x: int, y: int, largura: int, altura: int, monitor) -> tuple[int, int]:
+    """Desloca (x, y) o mínimo necessário para a janela inteira caber no monitor.
+
+    Se a janela for maior que o monitor, prevalece o canto superior esquerdo (a barra
+    de botões continua alcançável). Usa a área total do monitor (webview.screens não
+    informa a área livre da barra de tarefas).
+    """
+    x = max(monitor.x, min(x, monitor.x + monitor.width - largura))
+    y = max(monitor.y, min(y, monitor.y + monitor.height - altura))
+    return x, y
+
+
+SECAO_POSICAO = "Position"
+SECAO_JANELA = "Janela"
+
+
+def _ler_config() -> configparser.ConfigParser | None:
     if not ARQUIVO_CONFIG.is_file():
         return None
-
     config = configparser.ConfigParser()
     try:
         config.read(ARQUIVO_CONFIG, encoding="utf-8")
-        x = config.getint("Position", "x")
-        y = config.getint("Position", "y")
-    except (configparser.Error, ValueError, OSError) as erro:
+    except (configparser.Error, OSError) as erro:
+        logger.warning("Configuração da janela ilegível: %s", erro)
+        return None
+    return config
+
+
+def carregar_posicao(monitores: list) -> tuple[int, int] | None:
+    """Lê a última posição salva, se ela ainda estiver dentro de algum monitor."""
+    config = _ler_config()
+    if config is None:
+        return None
+    try:
+        x = config.getint(SECAO_POSICAO, "x")
+        y = config.getint(SECAO_POSICAO, "y")
+    except (configparser.Error, ValueError) as erro:
         logger.warning("Posição salva inválida: %s", erro)
         return None
 
-    if monitor_no_ponto(x, y, webview.screens) is None:
+    if monitor_no_ponto(x, y, monitores) is None:
         return None
     return x, y
 
 
-def salvar_posicao(x: int, y: int) -> None:
+def carregar_modo_compacto() -> bool:
+    """Lê o modo da janela salvo; sem arquivo ou com valor inválido, o modo completo."""
+    config = _ler_config()
+    if config is None:
+        return False
+    try:
+        return config.getboolean(SECAO_JANELA, "compacto", fallback=False)
+    except ValueError as erro:
+        logger.warning("Modo da janela salvo inválido: %s", erro)
+        return False
+
+
+def salvar_configuracao(x: int, y: int, compacto: bool) -> None:
+    """Grava posição e modo juntos: o arquivo é sempre reescrito por inteiro."""
     config = configparser.ConfigParser()
-    config["Position"] = {"x": str(x), "y": str(y)}
+    config[SECAO_POSICAO] = {"x": str(x), "y": str(y)}
+    config[SECAO_JANELA] = {"compacto": "1" if compacto else "0"}
     PASTA_DADOS.mkdir(parents=True, exist_ok=True)
     with open(ARQUIVO_CONFIG, "w", encoding="utf-8") as arquivo:
         config.write(arquivo)
@@ -160,11 +207,12 @@ class ExposedApi:
     Por isso a janela e o repositório ficam em atributos com "_", que não são expostos.
     """
 
-    def __init__(self, repositorio: RepositorioAlertas, metricas) -> None:
+    def __init__(self, repositorio: RepositorioAlertas, metricas, compacto: bool = False) -> None:
         self._janela: webview.Window | None = None
         self._handle: int | None = None
         self._repositorio = repositorio
         self._metricas = metricas
+        self._compacto = compacto
 
     def _vincular(self, janela: webview.Window) -> None:
         self._janela = janela
@@ -186,13 +234,49 @@ class ExposedApi:
 
     def _centralizar(self) -> None:
         monitores = webview.screens
+        altura = altura_da_janela(self._compacto)
         centro_x = self._janela.x + WINDOW_WIDTH // 2
-        centro_y = self._janela.y + WINDOW_HEIGHT // 2
+        centro_y = self._janela.y + altura // 2
         monitor = monitor_no_ponto(centro_x, centro_y, monitores) or monitor_principal(monitores)
         if monitor is None:
             logger.warning("Nenhum monitor encontrado para centralizar a janela")
             return
-        self._janela.move(*posicao_centralizada(monitor))
+        self._janela.move(*posicao_centralizada(monitor, WINDOW_WIDTH, altura))
+
+    def definir_compacto(self, ativo: bool) -> bool:
+        """Liga ou desliga o modo compacto: muda a altura da janela mantendo o topo.
+
+        Se a janela maior passar da borda do monitor, ela sobe o necessário. Retorna
+        True se a janela foi redimensionada. O modo é gravado no .ini ao fechar.
+
+        window.resize do pywebview 6.2.1 (WinForms) chama SetWindowPos pelo ctypes, que
+        libera o GIL (como window.move, usado em centralizar): não trava como o setter de
+        TopMost (ver topo_janela.py).
+        """
+        if not self._janela:
+            return False
+        with self._metricas.medir("definir_compacto"):
+            return self._definir_compacto(bool(ativo))
+
+    def _definir_compacto(self, ativo: bool) -> bool:
+        altura = altura_da_janela(ativo)
+        try:
+            self._janela.resize(WINDOW_WIDTH, altura)  # topo fixo (FixPoint.NORTH | WEST, o padrão)
+            self._compacto = ativo
+            x, y = self._janela.x, self._janela.y
+            monitores = webview.screens
+            monitor = monitor_no_ponto(x, y, monitores) or monitor_principal(monitores)
+            if monitor is not None:
+                nova = posicao_dentro_do_monitor(x, y, WINDOW_WIDTH, altura, monitor)
+                if nova != (x, y):
+                    self._janela.move(*nova)
+        except Exception:  # noqa: BLE001 - a página só precisa saber que falhou
+            logger.exception("Falha ao mudar o modo compacto")
+            return False
+        return True
+
+    def _modo_compacto(self) -> bool:
+        return self._compacto
 
     def _handle_janela(self) -> int | None:
         """Handle Win32 da janela, localizado na primeira vez e depois reutilizado."""
@@ -270,6 +354,30 @@ class ExposedApiComMedicao(ExposedApi):
         motivo = str(dados.get("motivo", ""))
         self._metricas.gravar_api_python(motivo)
         return self._metricas.gravar("js", {"relatorio": dados})
+
+
+# ---------------------------------------------------------------------------
+# Tamanho inicial da janela
+# ---------------------------------------------------------------------------
+
+def registrar_ajuste_de_tamanho(janela: webview.Window, api: ExposedApi) -> None:
+    """Corrige o tamanho da janela assim que ela é exibida (evento shown).
+
+    O pywebview 6.2.1 (WinForms) define o tamanho da janela ainda com a moldura normal e
+    só depois aplica o frameless; o WinForms mantém a área interna, e a janela nasce menor
+    pela moldura (~16 px na largura e ~40 px na altura com 100% de escala). O resize usa
+    SetWindowPos pelo ctypes (libera o GIL, como em definir_compacto). A janela é exibida
+    antes de a página começar a carregar, então a correção acontece com ela ainda vazia.
+    """
+
+    def ajustar() -> None:  # sem parâmetros e sem retorno (ver armadilha dos handlers)
+        try:
+            janela.resize(WINDOW_WIDTH, altura_da_janela(api._modo_compacto()))
+            METRICAS.marcar("tamanho_ajustado")
+        except Exception:  # noqa: BLE001 - a janela continua utilizável, só um pouco menor
+            logger.exception("Falha ao ajustar o tamanho inicial da janela")
+
+    janela.events.shown += ajustar
 
 
 # ---------------------------------------------------------------------------
@@ -370,26 +478,31 @@ def abrir_janela() -> None:
     if not index.is_file():
         logger.error("index.html não encontrado em %s", PASTA_RECURSOS)
         return
+    compacto = carregar_modo_compacto()
+    classe_api = ExposedApiComMedicao if MEDICAO_ATIVA else ExposedApi
+    api = classe_api(RepositorioAlertas(PASTA_DADOS), METRICAS, compacto=compacto)
+
     aplicativo = criar_aplicativo(
         PASTA_RECURSOS, html_da_pagina, BUSCA_PRIMEIRO_PRECO,
         ajustar_preload=not recurso_desligado_na_medicao(VARIAVEL_SEM_AJUSTE_PRELOAD),
         tipos_fixos=not recurso_desligado_na_medicao(VARIAVEL_SEM_TIPOS_FIXOS),
         preco_no_html=not recurso_desligado_na_medicao(VARIAVEL_SEM_PRECO_NO_HTML),
         marcar=METRICAS.marcar if MEDICAO_ATIVA else None,
+        modo_compacto=api._modo_compacto,
     )
-
-    classe_api = ExposedApiComMedicao if MEDICAO_ATIVA else ExposedApi
-    api = classe_api(RepositorioAlertas(PASTA_DADOS), METRICAS)
 
     # A 1ª leitura de webview.screens inicializa o motor gráfico (pythonnet/.NET);
     # o marco separa esse custo do create_window.
-    posicao = carregar_posicao()
-    METRICAS.marcar("posicao_calculada")
+    altura = altura_da_janela(compacto)
+    monitores = webview.screens
+    posicao = carregar_posicao(monitores)
     if posicao is not None:
-        x, y = posicao
+        monitor = monitor_no_ponto(*posicao, monitores)
+        x, y = posicao_dentro_do_monitor(*posicao, WINDOW_WIDTH, altura, monitor)
     else:
-        monitor = monitor_principal(webview.screens)
-        x, y = posicao_centralizada(monitor) if monitor else (None, None)
+        monitor = monitor_principal(monitores)
+        x, y = posicao_centralizada(monitor, WINDOW_WIDTH, altura) if monitor else (None, None)
+    METRICAS.marcar("posicao_calculada")
 
     # url = aplicativo WSGI: o pywebview o serve em http://127.0.0.1:PORTA_LOCAL/ (a mesma
     # origem do servidor padrão, então o localStorage é mantido). Ver servidor_local.py.
@@ -398,7 +511,7 @@ def abrir_janela() -> None:
         aplicativo,
         http_port=PORTA_LOCAL,
         width=WINDOW_WIDTH,
-        height=WINDOW_HEIGHT,
+        height=altura,
         frameless=True,
         background_color="#000000",
         x=x,
@@ -406,15 +519,16 @@ def abrir_janela() -> None:
         js_api=api,
     )
     api._vincular(janela)
+    registrar_ajuste_de_tamanho(janela, api)
     METRICAS.marcar("janela_criada")
     if MEDICAO_ATIVA:
         registrar_eventos_metricas(janela)
 
     def ao_fechar() -> None:
         try:
-            salvar_posicao(janela.x, janela.y)
+            salvar_configuracao(janela.x, janela.y, api._modo_compacto())
         except Exception:  # noqa: BLE001 - nunca impedir o fechamento da janela
-            logger.exception("Falha ao salvar a posição da janela")
+            logger.exception("Falha ao salvar a posição e o modo da janela")
 
     janela.events.closing += ao_fechar
     METRICAS.marcar("webview_start")

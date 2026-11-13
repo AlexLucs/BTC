@@ -67,6 +67,19 @@ def embutir_preco(html: str, dados: list) -> str:
     return html.replace("</head>", bloco + "</head>", 1)
 
 
+# Modo compacto: a página lê a classe "compacto" do <html> no DOMContentLoaded (script.js).
+# No app, o modo vem do Python (salvo no .ini e alterado por definir_compacto), e este
+# servidor já entrega o HTML com a classe; assim a página abre (e recarrega com ↻) no
+# layout certo para o tamanho da janela, sem trocar de layout depois. Não mudar a linha
+# do <html> no index.html sem mudar TAG_HTML.
+TAG_HTML = '<html lang="pt-BR">'
+TAG_HTML_COMPACTO = '<html lang="pt-BR" class="compacto">'
+
+
+def marcar_compacto(html: str) -> str:
+    return html.replace(TAG_HTML, TAG_HTML_COMPACTO, 1)
+
+
 # Quanto /preco-inicial espera a busca do Python terminar. A página corre o REST em
 # paralelo e usa o que chegar antes, então esperar aqui nunca atrasa o 1º preço.
 ESPERA_PRECO_INICIAL_S = 1.5
@@ -91,7 +104,8 @@ class _AoTerminar:
 
 def criar_aplicativo(pasta: Path, html_da_pagina: Callable[[], str], busca_preco,
                      ajustar_preload: bool = True, tipos_fixos: bool = True, preco_no_html: bool = True,
-                     marcar: Callable[[str], None] | None = None):
+                     marcar: Callable[[str], None] | None = None,
+                     modo_compacto: Callable[[], bool] | None = None):
     """Aplicativo WSGI da página.
 
     Args:
@@ -104,9 +118,12 @@ def criar_aplicativo(pasta: Path, html_da_pagina: Callable[[], str], busca_preco
         preco_no_html: embute no HTML o 1º preço, se o Python já o tiver (desligado só na medição).
         marcar: só na medição; recebe os marcos servidor_pedido:<arquivo> (o pedido chegou
             ao aplicativo) e servidor_fim:<arquivo> (o servidor terminou de enviar a resposta).
+        modo_compacto: devolve True se a janela está no modo compacto (consultado a cada
+            pedido de "/", para o ↻ também respeitar o modo atual).
     """
     aplicativo = _criar_rotas(pasta, html_da_pagina, busca_preco, ajustar_preload, tipos_fixos,
-                              preco_no_html, marcar or (lambda nome: None))
+                              preco_no_html, marcar or (lambda nome: None),
+                              modo_compacto or (lambda: False))
     if marcar is None:
         return aplicativo
 
@@ -119,7 +136,8 @@ def criar_aplicativo(pasta: Path, html_da_pagina: Callable[[], str], busca_preco
 
 
 def _criar_rotas(pasta: Path, html_da_pagina: Callable[[], str], busca_preco, ajustar_preload: bool,
-                 tipos_fixos: bool, preco_no_html: bool, marcar: Callable[[str], None]) -> bottle.Bottle:
+                 tipos_fixos: bool, preco_no_html: bool, marcar: Callable[[str], None],
+                 modo_compacto: Callable[[], bool]) -> bottle.Bottle:
     aplicativo = bottle.Bottle()
 
     def sem_cache(resposta: bottle.BaseResponse) -> bottle.BaseResponse:
@@ -133,6 +151,8 @@ def _criar_rotas(pasta: Path, html_da_pagina: Callable[[], str], busca_preco, aj
         html = html_da_pagina()
         if ajustar_preload:
             html = ajustar_preload_para_http(html)
+        if modo_compacto():
+            html = marcar_compacto(html)
         if preco_no_html and "</head>" in html:
             dados = busca_preco.resultado(0)  # sem esperar; a entrega é única
             if dados is not None:

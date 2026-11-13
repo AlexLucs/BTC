@@ -24,6 +24,7 @@ const URL_TAXAS = 'https://mempool.space/api/v1/fees/precise';
 
 const CHAVE_ALERTAS = 'alertasjson';
 const CHAVE_ESTADO = 'ultimoEstado';     // último estado exibido (ver "Último estado salvo")
+const CHAVE_COMPACTO = 'modoCompacto';   // só no navegador; no app, o modo fica no .ini (Python)
 const CAMPOS_TAXA = ['fastestFee', 'halfHourFee', 'hourFee', 'minimumFee'];
 
 // ---------------------------------------------------------------------------
@@ -60,8 +61,11 @@ const PROPORCAO_GRAFICO = 310 / 440;
 const SOBRA_GRAFICO = 2;
 const INTERVALO_RELATORIO_METRICAS = 5 * 60 * 1000;
 const ESPERA_MAX_RELATORIO_ABERTURA = 15000; // após o 1º preço, se o gráfico não carregar antes
-const MAX_FALHAS = 10;             // falhas seguidas da cotação BTC/BRL antes de pausar
-const CICLOS_ANTES_SEM_DADOS = 3;  // falhas seguidas em que o último preço continua na tela
+const MAX_FALHAS = 10;             // falhas seguidas da cotação BTC/BRL antes de pausar (só sem alertas cadastrados)
+// Falhas seguidas da fonte de um campo em que o último valor (salvo ou novo) continua na tela.
+// Vale para todos: preço BRL e USDT (Binance), dólar comercial (AwesomeAPI) e taxas (mempool.space).
+// Sem nenhum valor na tela (1ª execução), a 1ª falha já mostra "Sem Dados".
+const CICLOS_ANTES_SEM_DADOS = 3;
 
 // ---------------------------------------------------------------------------
 // Formatadores (criados uma vez só)
@@ -72,7 +76,8 @@ const formatoTaxa = new Intl.NumberFormat('pt-BR', { minimumFractionDigits: 2, m
 const formatoData = new Intl.DateTimeFormat('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit' });
 const formatoHora = new Intl.DateTimeFormat('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 
-const SETA_POR_DIRECAO = { [-1]: '  ↓', 0: '↔', 1: '  ↑' };
+// O espaço antes da seta e a largura dela vêm do style.css (#info-seta), não do texto.
+const SETA_POR_DIRECAO = { [-1]: '↓', 0: '↔', 1: '↑' };
 const SEM_VALOR = '—';
 // Web Animations API: reinicia o "surgimento" da seta sem forçar reflow.
 const ANIMACAO_SETA = [{ opacity: 0 }, { opacity: 1 }];
@@ -98,6 +103,16 @@ let ultimaCotacaoDolar = NaN;
 let precoAnterior = NaN;          // referência da seta de direção
 let falhasBRL = 0;
 let falhasUSD = 0;
+let falhasDolar = 0;
+let falhasTaxas = 0;
+// Valores na tela (salvos ou novos; NaN/false em "Sem Dados"). Só para exibição: o estado
+// salvo nunca entra nos alarmes, que usam ultimoPrecoBRL.
+let precoBRLExibido = NaN;
+let precoUSDExibido = NaN;
+let taxasNaTela = false;
+// Grupos de campos que ainda mostram o valor do estado salvo: ficam esmaecidos até a fonte
+// deles responder (ou até virarem "Sem Dados"). Ver marcarSalvo/marcarAtualizado.
+const gruposSalvos = new Set();
 
 let ws = null;                    // conexão atual com o stream da Binance
 let wsSaudavel = false;           // recebendo BTC/BRL pelo WebSocket: o polling REST fica parado
@@ -111,9 +126,14 @@ let alertaAberto = false;
 let audioAlerta = null;
 
 let graficoVisivel = false;       // escolha do usuário pelo botão ⇄ (padrão: atributo "hidden" de #grafico no HTML)
+let compacto = false;             // modo compacto: classe "compacto" no <html> (no app, vem do servidor local na abertura)
+let filaCompacto = Promise.resolve(); // pedidos de redimensionamento ao Python, na ordem dos cliques
 let fixado = false;
 let monitorarInatividade = true;  // desligado enquanto a janela está fixada no topo
 let ultimaInteracao = Date.now();
+// Um alarme disparou e ainda não houve atividade depois dele: a inatividade não pausa até o
+// usuário voltar (e só conta os ~17 min a partir dessa atividade).
+let alarmeSemAtividade = false;
 
 let wakeLock = null;
 let pedindoWakeLock = false;
@@ -129,12 +149,15 @@ function capturarElementos() {
 	ui = {
 		preco: el('info-price'),
 		usdt: el('info-usdt'),
-		dolar: el('info-dolar'),
+		dolarImplicito: el('dolar-implicito'),
+		dolarComercial: el('dolar-comercial'),
 		percentual: el('info-percent'),
 		seta: el('info-seta'),
 		horario: el('info-time'),
 		maxima: el('highPrice'),
 		minima: el('lowPrice'),
+		faixaMaxima: el('faixaMaxima'),
+		faixaMinima: el('faixaMinima'),
 		maximaUSD: el('highPriceDol'),
 		minimaUSD: el('lowPriceDol'),
 		taxas: Object.fromEntries(CAMPOS_TAXA.map(campo => [campo, el(campo)])),
@@ -148,6 +171,25 @@ function capturarElementos() {
 		campoValor: el('valorAlerta'),
 		corpoTabela: el('alertasTabela').tBodies[0],
 	};
+	ui.grupos = {
+		brl: [ui.preco, ui.horario, document.querySelector('.percentual'), ui.maxima, ui.minima, ui.faixaMaxima, ui.faixaMinima],
+		usdt: [ui.usdt, ui.maximaUSD, ui.minimaUSD],
+		dolarImplicito: [ui.dolarImplicito],
+		dolarComercial: [ui.dolarComercial],
+		taxas: Object.values(ui.taxas),
+	};
+}
+
+/** O grupo passa a mostrar o valor do estado salvo (esmaecido). */
+function marcarSalvo(grupo) {
+	gruposSalvos.add(grupo);
+	for (const elemento of ui.grupos[grupo]) elemento.classList.add('desatualizado');
+}
+
+/** A fonte do grupo respondeu (ou o grupo virou "Sem Dados"): sai o esmaecimento. */
+function marcarAtualizado(grupo) {
+	if (!gruposSalvos.delete(grupo)) return; // só mexe no DOM uma vez
+	for (const elemento of ui.grupos[grupo]) elemento.classList.remove('desatualizado');
 }
 
 /** Só altera o DOM quando o texto muda (atribuir textContent sempre invalida o layout). */
@@ -352,7 +394,9 @@ function processarPrecos(geracao, porSimbolo, erroRede) {
 	else registrarFalhaUSD(usd.erro);
 	depoisDeAtualizarPrecos(geracao, { ...(brl.ticker && { brl: brl.ticker }), ...(usd.ticker && { usdt: usd.ticker }) });
 
-	if (falhasBRL >= MAX_FALHAS) {
+	// Com alertas cadastrados nunca pausa: quando a internet voltar, os alertas precisam
+	// estar sendo checados. O preço já mostra "Sem Dados" e o ciclo segue tentando.
+	if (falhasBRL >= MAX_FALHAS && alertas.length === 0) {
 		console.warn(`${MAX_FALHAS} falhas consecutivas: pausando monitoramento.`);
 		pausar(true);
 		return;
@@ -377,7 +421,7 @@ function registrarFalhaBRL(erro) {
 	Metricas.contar('falha:brl');
 	falhasBRL++;
 	// Mantém o último preço na tela por alguns ciclos (inclusive o do estado salvo).
-	if (falhasBRL >= CICLOS_ANTES_SEM_DADOS || (!Number.isFinite(ultimoPrecoBRL) && !exibindoEstadoSalvo)) {
+	if (falhasBRL >= CICLOS_ANTES_SEM_DADOS || !Number.isFinite(precoBRLExibido)) {
 		ultimoPrecoBRL = NaN;
 		exibirSemDadosBRL();
 	}
@@ -387,7 +431,7 @@ function registrarFalhaUSD(erro) {
 	console.error('Erro ao buscar BTC/USDT na Binance:', erro);
 	Metricas.contar('falha:usdt');
 	falhasUSD++;
-	if (falhasUSD >= CICLOS_ANTES_SEM_DADOS || (!Number.isFinite(ultimoPrecoUSD) && !exibindoEstadoSalvo)) {
+	if (falhasUSD >= CICLOS_ANTES_SEM_DADOS || !Number.isFinite(precoUSDExibido)) {
 		ultimoPrecoUSD = NaN;
 		exibirSemDadosUSD();
 	}
@@ -547,10 +591,18 @@ async function atualizarDolar(geracao) {
 	if (falha) {
 		console.error('Erro ao buscar USD/BRL na AwesomeAPI:', falha);
 		Metricas.contar('falha:dolar');
+		falhasDolar++;
+		// Mantém a última cotação (salva ou nova) por alguns ciclos, como o preço.
+		if (falhasDolar >= CICLOS_ANTES_SEM_DADOS || !Number.isFinite(ultimaCotacaoDolar)) {
+			ultimaCotacaoDolar = NaN;
+			marcarAtualizado('dolarComercial');
+		}
 	} else {
+		falhasDolar = 0;
+		ultimaCotacaoDolar = cotacao;
+		marcarAtualizado('dolarComercial');
 		atualizarEstado({ dolar: cotacao });
 	}
-	ultimaCotacaoDolar = cotacao;
 	exibirDolar();
 	agendar('dolar', atualizarDolar, DOLAR_INTERVALO_MIN, DOLAR_INTERVALO_VARIACAO, geracao);
 }
@@ -571,11 +623,14 @@ async function atualizarTaxas(geracao) {
 	if (falha) {
 		console.error('Erro ao buscar taxas na mempool.space:', falha);
 		Metricas.contar('falha:taxas');
+		falhasTaxas++;
+		// Mantém as últimas taxas (salvas ou novas) por alguns ciclos, como o preço.
+		if (falhasTaxas >= CICLOS_ANTES_SEM_DADOS || !taxasNaTela) exibirSemDadosTaxas();
 	} else {
-		CAMPOS_TAXA.forEach((campo, indice) => {
-			definirTexto(ui.taxas[campo], `${formatoTaxa.format(valores[indice])} sat/vB`);
-		});
-		atualizarEstado({ taxas: Object.fromEntries(CAMPOS_TAXA.map((campo, indice) => [campo, valores[indice]])) });
+		falhasTaxas = 0;
+		const taxas = Object.fromEntries(CAMPOS_TAXA.map((campo, indice) => [campo, valores[indice]]));
+		exibirTaxas(taxas);
+		atualizarEstado({ taxas });
 	}
 	agendar('taxas', atualizarTaxas, TAXAS_INTERVALO_MIN, TAXAS_INTERVALO_VARIACAO, geracao);
 }
@@ -583,6 +638,14 @@ async function atualizarTaxas(geracao) {
 // ---------------------------------------------------------------------------
 // Exibição
 // ---------------------------------------------------------------------------
+
+/** Máxima e mínima de 24 h em BRL: na tabela (modo completo) e no rodapé do modo compacto. */
+function exibirMaximaMinimaBRL(maxima, minima) {
+	definirTexto(ui.maxima, maxima);
+	definirTexto(ui.minima, minima);
+	definirTexto(ui.faixaMaxima, maxima);
+	definirTexto(ui.faixaMinima, minima);
+}
 
 function exibirBRL({ preco, variacao, maxima, minima }) {
 	const precoFormatado = formatoBRL.format(preco);
@@ -592,9 +655,9 @@ function exibirBRL({ preco, variacao, maxima, minima }) {
 	// No app o título nativo não acompanha o document.title (sempre "BTC Status").
 	if (!isPyWebView) document.title = `${precoFormatado} | ${variacaoFormatada}`;
 	sairDoEstadoSalvo();
+	precoBRLExibido = preco;
 	definirTexto(ui.preco, precoFormatado);
-	definirTexto(ui.maxima, formatoBRL.format(maxima));
-	definirTexto(ui.minima, formatoBRL.format(minima));
+	exibirMaximaMinimaBRL(formatoBRL.format(maxima), formatoBRL.format(minima));
 	definirTexto(ui.horario, `${formatoData.format(agora)} - ${formatoHora.format(agora)}`);
 	definirTexto(ui.percentual, variacaoFormatada);
 
@@ -611,30 +674,55 @@ function exibirBRL({ preco, variacao, maxima, minima }) {
 function exibirSemDadosBRL() {
 	if (!isPyWebView) document.title = 'Sem Dados';
 	sairDoEstadoSalvo();
+	precoBRLExibido = NaN;
 	definirTexto(ui.preco, '▶Sem Dados◀');
-	definirTexto(ui.maxima, SEM_VALOR);
-	definirTexto(ui.minima, SEM_VALOR);
+	exibirMaximaMinimaBRL(SEM_VALOR, SEM_VALOR);
 	definirTexto(ui.percentual, SEM_VALOR);
 	ui.seta.textContent = '';
 	precoAnterior = NaN; // ao voltar, a seta recomeça neutra
 }
 
 function exibirUSD({ preco, maxima, minima }) {
+	precoUSDExibido = preco;
+	marcarAtualizado('usdt');
 	definirTexto(ui.usdt, formatoUSD.format(preco));
 	definirTexto(ui.maximaUSD, formatoUSD.format(maxima));
 	definirTexto(ui.minimaUSD, formatoUSD.format(minima));
 }
 
 function exibirSemDadosUSD() {
+	precoUSDExibido = NaN;
+	marcarAtualizado('usdt');
 	definirTexto(ui.usdt, 'Sem Dados');
 	definirTexto(ui.maximaUSD, SEM_VALOR);
 	definirTexto(ui.minimaUSD, SEM_VALOR);
 }
 
-/** Mostra "dólar implícito (BTC/BRL ÷ BTC/USDT) | dólar comercial". */
+/**
+ * Mostra "dólar implícito (BTC/BRL ÷ BTC/USDT) | dólar comercial", com os valores que estão
+ * na tela (salvos ou novos). O implícito só deixa de estar esmaecido quando BRL e USDT
+ * já são novos (ou quando vira "Sem Dados").
+ */
 function exibirDolar() {
 	const formatar = valor => (Number.isFinite(valor) ? formatoBRL.format(valor) : 'Sem Dados');
-	definirTexto(ui.dolar, `${formatar(ultimoPrecoBRL / ultimoPrecoUSD)} | ${formatar(ultimaCotacaoDolar)}`);
+	const implicito = precoBRLExibido / precoUSDExibido;
+	definirTexto(ui.dolarImplicito, formatar(implicito));
+	definirTexto(ui.dolarComercial, formatar(ultimaCotacaoDolar));
+	if (!Number.isFinite(implicito) || (!gruposSalvos.has('brl') && !gruposSalvos.has('usdt'))) {
+		marcarAtualizado('dolarImplicito');
+	}
+}
+
+function exibirTaxas(taxas) {
+	taxasNaTela = true;
+	marcarAtualizado('taxas');
+	for (const campo of CAMPOS_TAXA) definirTexto(ui.taxas[campo], `${formatoTaxa.format(taxas[campo])} sat/vB`);
+}
+
+function exibirSemDadosTaxas() {
+	taxasNaTela = false;
+	marcarAtualizado('taxas');
+	for (const campo of CAMPOS_TAXA) definirTexto(ui.taxas[campo], SEM_VALOR);
 }
 
 /** Esconde a tela de carregamento (ao exibir o estado salvo ou a 1ª resposta de preço). */
@@ -672,31 +760,38 @@ function restaurarEstadoSalvo() {
 
 function exibirEstadoSalvo({ salvoEm, brl, usdt, dolar, taxas }) {
 	exibindoEstadoSalvo = true;
-	const formatar = valor => (Number.isFinite(valor) ? formatoBRL.format(valor) : 'Sem Dados');
 	const salvo = new Date(salvoEm);
 
 	if (!isPyWebView) document.title = `${formatoBRL.format(brl.preco)} (salvo)`;
 	definirTexto(ui.preco, formatoBRL.format(brl.preco));
-	definirTexto(ui.maxima, formatoBRL.format(brl.maxima));
-	definirTexto(ui.minima, formatoBRL.format(brl.minima));
+	exibirMaximaMinimaBRL(formatoBRL.format(brl.maxima), formatoBRL.format(brl.minima));
 	definirTexto(ui.percentual, `${brl.variacao.toFixed(2)}%`);
-	ui.seta.textContent = '';
+	// Seta neutra já com o número: o 1º preço novo a mantém até o preço mudar (exibirBRL).
+	ui.seta.classList.add('seta-neutra');
+	ui.seta.textContent = SETA_POR_DIRECAO[0];
 	definirTexto(ui.horario, `atualizando… (salvo em ${formatoData.format(salvo)} - ${formatoHora.format(salvo)})`);
-	if (usdt) exibirUSD(usdt);
-	definirTexto(ui.dolar, `${formatar(usdt ? brl.preco / usdt.preco : NaN)} | ${formatar(dolar ?? NaN)}`);
-	// O dólar comercial salvo vale até a 1ª resposta da AwesomeAPI (só exibição).
-	if (dolar !== null) ultimaCotacaoDolar = dolar;
-	if (taxas) {
-		for (const campo of CAMPOS_TAXA) definirTexto(ui.taxas[campo], `${formatoTaxa.format(taxas[campo])} sat/vB`);
+	precoBRLExibido = brl.preco; // só exibição: ultimoPrecoBRL continua NaN
+	marcarSalvo('brl');
+	if (usdt) {
+		exibirUSD(usdt);
+		marcarSalvo('usdt');
 	}
-	for (const elemento of [ui.preco, ui.horario]) elemento.classList.add('desatualizado');
+	// O dólar comercial salvo segue a mesma regra das falhas (só exibição).
+	if (dolar !== null) ultimaCotacaoDolar = dolar;
+	exibirDolar();
+	if (Number.isFinite(precoBRLExibido / precoUSDExibido)) marcarSalvo('dolarImplicito');
+	if (dolar !== null) marcarSalvo('dolarComercial');
+	if (taxas) {
+		exibirTaxas(taxas);
+		marcarSalvo('taxas');
+	}
 }
 
 /** Chamado quando chega dado novo de BRL (ou quando ele falha de vez). */
 function sairDoEstadoSalvo() {
 	if (!exibindoEstadoSalvo) return;
 	exibindoEstadoSalvo = false;
-	for (const elemento of [ui.preco, ui.horario]) elemento.classList.remove('desatualizado');
+	marcarAtualizado('brl');
 }
 
 /** Junta dados novos ao estado e grava (no máximo a cada INTERVALO_SALVAR_ESTADO). */
@@ -754,7 +849,7 @@ let sincronizacaoAlertasConcluida = false; // no app, carregar_alerta já respon
  * - gráfico oculto, no navegador: depois do "load".
  */
 function aberturaConcluida() {
-	if (graficoVisivel) return 'grafico_carregado' in Metricas.marcos;
+	if (graficoVisivel && !compacto) return 'grafico_carregado' in Metricas.marcos;
 	return isPyWebView ? sincronizacaoAlertasConcluida : document.readyState === 'complete';
 }
 
@@ -776,7 +871,7 @@ function enviarRelatorioAbertura(forcar = false) {
  * novo o <template>, e o script do TradingView recria o gráfico.
  */
 function atualizarGrafico() {
-	const mostrar = graficoVisivel && ativo;
+	const mostrar = graficoVisivel && ativo && !compacto;
 	ui.grafico.style.display = mostrar ? 'flex' : 'none';
 	ui.grafico.hidden = !mostrar; // mantém o atributo do HTML coerente com o que está na tela
 	if (!mostrar) {
@@ -843,6 +938,66 @@ function alternarGrafico() {
 }
 
 // ---------------------------------------------------------------------------
+// Modo compacto
+//
+// A classe "compacto" no <html> define o layout (style.css). No app, o Python
+// também redimensiona a janela (definir_compacto) e guarda o modo no .ini; na
+// abertura e no ↻, o servidor local já entrega o HTML com a classe. No navegador,
+// só o layout muda e o modo fica no localStorage. A escolha do ⇄ é mantida: o gráfico sai
+// no modo compacto e volta, se estava aberto, no modo completo.
+// ---------------------------------------------------------------------------
+
+function alternarCompacto() {
+	compacto = !compacto;
+	Metricas.evento('compacto', { ativo: compacto });
+	aplicarCompacto();
+	if (!isPyWebView) {
+		gravarCompactoLocal(compacto);
+		return;
+	}
+	const pedido = compacto;
+	// Em fila: cada chamada da js_api roda numa thread do Python, e dois cliques
+	// seguidos poderiam redimensionar a janela fora de ordem.
+	filaCompacto = filaCompacto
+		.then(() => chamarApi('definir_compacto', pedido)) // chamarApi nunca rejeita
+		.then(resultado => {
+			if (resultado !== true) console.warn('Falha ao redimensionar a janela para o modo', pedido ? 'compacto' : 'completo');
+		});
+}
+
+/** No navegador, o modo fica no localStorage (no app, no .ini, pelo Python). */
+function lerCompactoLocal() {
+	try {
+		return localStorage.getItem(CHAVE_COMPACTO) === '1';
+	} catch (erro) {
+		console.warn('Não foi possível ler o modo compacto salvo:', erro);
+		return false;
+	}
+}
+
+function gravarCompactoLocal(ativo) {
+	try {
+		localStorage.setItem(CHAVE_COMPACTO, ativo ? '1' : '0');
+	} catch (erro) {
+		console.warn('Não foi possível salvar o modo compacto:', erro);
+	}
+}
+
+function aplicarCompacto() {
+	document.documentElement.classList.toggle('compacto', compacto);
+	atualizarBotaoCompacto();
+	atualizarGrafico();
+}
+
+function atualizarBotaoCompacto() {
+	const botao = el('compacto-btn');
+	const rotulo = compacto ? 'Modo completo' : 'Modo compacto';
+	botao.textContent = compacto ? '⊞' : '⊟';
+	botao.title = rotulo;
+	botao.setAttribute('aria-label', rotulo);
+}
+
+// ---------------------------------------------------------------------------
 // Pausa, retomada e inatividade
 // ---------------------------------------------------------------------------
 
@@ -862,6 +1017,8 @@ function retomar({ silenciar }) {
 	Metricas.evento('retomada', { silenciar });
 	falhasBRL = 0;
 	falhasUSD = 0;
+	falhasDolar = 0;
+	falhasTaxas = 0;
 	ultimaInteracao = Date.now();
 	ui.overlay.style.display = 'none';
 	iniciarCiclos();
@@ -882,8 +1039,14 @@ function atualizarBotaoPausa() {
 	botao.setAttribute('aria-label', rotulo);
 }
 
-function registrarInteracao() {
+/** Conta como atividade sem retomar nada (os cliques têm as ações deles: ⏸, ■, OK...). */
+function registrarAtividade() {
 	ultimaInteracao = Date.now();
+	alarmeSemAtividade = false;
+}
+
+function registrarInteracao() {
+	registrarAtividade();
 	if (!ativo && !pausaManual) retomar({ silenciar: false });
 }
 
@@ -891,6 +1054,8 @@ function verificarInatividade() {
 	if (!ativo || !monitorarInatividade) return;
 	// Com algum alerta ativo, nunca pausa: é com o usuário longe que o alerta mais importa.
 	if (existeAlertaAtivo(alertas)) return;
+	// Depois de um alarme, só volta a contar a partir da próxima atividade do usuário.
+	if (alarmeSemAtividade) return;
 	if (Date.now() - ultimaInteracao >= LIMITE_INATIVIDADE) pausar(false);
 }
 
@@ -1010,11 +1175,13 @@ function configurarBotoesJanela() {
 		for (const botao of document.querySelectorAll('.btns')) botao.style.display = 'flex';
 		return;
 	}
-	// No navegador só fazem sentido Alertas, Gráfico e Pausar (os demais controlam a janela do app).
+	// No navegador só fazem sentido Alertas, Gráfico, Modo compacto (só o layout) e Pausar
+	// (os demais controlam a janela do app).
 	const posicoes = {
 		'alerta-btn': { left: '0px' },
 		'grafico-btn': { left: '40px' },
 		'pausar-btn': { left: 'unset', right: '0px' },
+		'compacto-btn': { right: '40px' },
 	};
 	for (const [id, posicao] of Object.entries(posicoes)) {
 		Object.assign(el(id).style, posicao, { display: 'flex' });
@@ -1171,6 +1338,7 @@ function checarAlarmes() {
 
 function dispararAlerta(alerta) {
 	alertaAberto = true;
+	alarmeSemAtividade = true;
 	const mensagem = alerta.tipo === TIPO.MAIOR ? 'O Preço do Bitcoin superou' : 'O Preço do Bitcoin caiu abaixo de';
 	mostrarDialogo({
 		titulo: 'ALERTA',
@@ -1351,6 +1519,7 @@ function registrarEventos() {
 		'close-btn': fecharJanela,
 		'close-btn-carregamento': fecharJanela,
 		'grafico-btn': alternarGrafico,
+		'compacto-btn': alternarCompacto,
 		'overlay': pararIniciar,
 		'darkback': alternarTelaAlerta,
 		'salvarBotao': criarAlerta,
@@ -1365,6 +1534,9 @@ function registrarEventos() {
 
 	document.addEventListener('keydown', registrarInteracao, { passive: true });
 	document.addEventListener('mousemove', registrarInteracao, { passive: true });
+	// Um clique sem mover o mouse (ex.: fechar o alarme com o ponteiro já sobre o OK) também é atividade.
+	// Não retoma a pausa por inatividade: quem retoma é o movimento ou o clique no ⏸.
+	document.addEventListener('pointerdown', registrarAtividade, { passive: true });
 	document.addEventListener('visibilitychange', () => {
 		if (document.visibilityState === 'hidden') gravarEstado(true);
 		else if (ativo) adquirirWakeLock();
@@ -1378,6 +1550,11 @@ document.addEventListener('DOMContentLoaded', () => {
 	Metricas.marcar('dom_pronto');
 	capturarElementos();
 	graficoVisivel = !ui.grafico.hidden; // padrão de abertura vem do index.html
+	// No app, o modo vem do servidor local (classe no <html>); no navegador, do localStorage.
+	// Aplicado antes de o conteúdo aparecer: a tela de carregamento cobre a troca.
+	if (isPyWebView) compacto = document.documentElement.classList.contains('compacto');
+	else document.documentElement.classList.toggle('compacto', compacto = lerCompactoLocal());
+	atualizarBotaoCompacto();
 	registrarEventos();
 	configurarBotoesJanela();
 	restaurarEstadoSalvo(); // antes das requisições: a tela já abre com os últimos valores

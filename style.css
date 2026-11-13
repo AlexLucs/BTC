@@ -166,6 +166,7 @@ input {
 #fixar-btn       { left: 120px; }
 #alerta-btn      { left: 160px; }
 #grafico-btn     { left: 200px; }
+#compacto-btn    { right: 80px; }
 #minimize-btn    { right: 40px; }
 #close-btn       { right: 0; }
 
@@ -362,7 +363,12 @@ input[type="number"]::-webkit-inner-spin-button {
     opacity: 0.55;
 }
 
+/* Largura fixa: trocar ↔/↑/↓ (larguras diferentes) ou apagar a seta ("Sem Dados") não
+   desloca o percentual, que é centralizado junto com ela. */
 #info-seta {
+    display: inline-block;
+    width: 1em;
+    text-align: center;
     font-weight: bold;
     color: var(--laranja);
 }
@@ -411,7 +417,8 @@ table {
     .dolar_btc_e_b3          { font-size: 0.7vw; }
     .percentual              { font-size: 3.7vw; }
     .horario_atualizacao     { font-size: 0.7vw; }
-    .bottom-left-info, table { font-size: 0.7vw; }
+    .bottom-left-info, table,
+    #info-faixa              { font-size: 0.7vw; }
 }
 
 @media (max-width: 1920px) {
@@ -421,7 +428,8 @@ table {
     .dolar_btc_e_b3          { font-size: 1.4vw; }
     .percentual              { font-size: 4.5vw; }
     .horario_atualizacao     { font-size: 1.4vw; }
-    .bottom-left-info, table { font-size: 1.4vw; }
+    .bottom-left-info, table,
+    #info-faixa              { font-size: 1.4vw; }
 }
 
 @media (max-width: 1024px) {
@@ -431,7 +439,8 @@ table {
     .dolar_btc_e_b3          { font-size: 2.7vw; }
     .percentual              { font-size: 8vw; }
     .horario_atualizacao     { font-size: 2.7vw; }
-    .bottom-left-info, table { font-size: 2.7vw; }
+    .bottom-left-info, table,
+    #info-faixa              { font-size: 2.7vw; }
 }
 
 @media (max-width: 640px) {
@@ -441,5 +450,96 @@ table {
     .dolar_btc_e_b3          { font-size: 3.5vw; }
     .percentual              { font-size: 16vw; }
     .horario_atualizacao     { font-size: 3.5vw; }
-    .bottom-left-info, table { font-size: 3.5vw; }
+    .bottom-left-info, table,
+    #info-faixa              { font-size: 3.5vw; }
+}
+
+/* ---------------------------------------------------------------------------
+   Modo compacto (classe "compacto" no <html>; script.js: alternarCompacto).
+   No app, a janela passa a ter 500x388 (BTC_Monitor.py: ALTURA_COMPACTA); no
+   navegador, só o layout muda. Sem o logo, a tabela, o gráfico e o botão ⇄; a
+   máxima e a mínima de 24 h em BRL ficam numa linha só (#info-faixa).
+   --------------------------------------------------------------------------- */
+/* Oculto no modo completo; o modo compacto o exibe abaixo. */
+#info-faixa {
+    display: none;
+}
+
+/* O gráfico não tem regra aqui: atualizarGrafico o desmonta no modo compacto. */
+html.compacto #info-logo,
+html.compacto .bottom-left-info {
+    display: none;
+}
+
+/* O script.js exibe os botões com style.display; só !important vence o estilo inline. */
+html.compacto #grafico-btn {
+    display: none !important;
+}
+
+/* Sem o logo, a margem da barra de botões passa para o bloco de informações. */
+html.compacto #conteudoMenosBotoes {
+    margin-top: var(--altura-barra);
+}
+
+html.compacto #info-faixa {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.7em;
+    width: 100%;
+    margin-top: 10px;
+    padding-top: 6px;
+    border-top: 1px solid var(--texto);
+    white-space: nowrap;
+}
+
+#info-faixa .rotulo {
+    color: var(--laranja);
+}
+
+/* O ⏸ de 15rem (240 px) não caberia na janela compacta. */
+html.compacto #overlay {
+    font-size: 8rem;
+}
+
+/* A pausa, o fundo escuro e a tela de alertas ficam presos ao bloco do conteúdo, não à
+   janela: no navegador, a janela pode ser bem maior que o bloco compacto. O #conteudo
+   (position: fixed) passa a ter a altura do conteúdo e é o bloco de referência deles.
+   No app (500x388) o bloco ocupa a janela: 378 px de conteúdo + 10 px de margem. */
+html.compacto #conteudo {
+    height: auto;
+    padding-bottom: 10px;
+}
+
+html.compacto .overlay {
+    position: absolute;
+    height: auto;
+    bottom: 0;
+}
+
+/* A tela de alertas ocupa a altura do bloco abaixo da barra; só a lista encolhe e rola.
+   O .modal continua "display: block" (script.js); o flex fica no .modal-content. */
+html.compacto .modal {
+    position: absolute;
+    top: calc(var(--altura-barra) + 4px);
+    bottom: 4px;
+    transform: translateX(-50%);
+}
+
+html.compacto .modal-content {
+    height: 100%;
+    max-height: 100%;
+    padding: 8px 12px;
+}
+
+html.compacto .modal-content p {
+    font-size: x-large;
+    margin-bottom: 8px;
+}
+
+html.compacto input[type="number"] {
+    margin-bottom: 8px;
+}
+
+html.compacto #botoesAlerta {
+    margin-top: 8px;
 }

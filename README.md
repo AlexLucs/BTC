@@ -1,9 +1,5 @@
 # BTC Status
 
-<img width="484" height="771" alt="image" src="https://github.com/user-attachments/assets/7bfd24f1-635f-4bcc-853b-afe502b7cb28" />
-<img width="484" height="771" alt="image" src="https://github.com/user-attachments/assets/d52b20e7-9501-4641-98dd-b2f4afaa632a" />
-
-
 Monitor de preço do Bitcoin para Windows: uma janela pequena, sem moldura, que mostra em tempo real o preço do BTC em reais e em dólares, as taxas da rede e um gráfico, com alertas de preço sonoros.
 
 ## Funcionalidades
@@ -147,5 +143,3 @@ Para começar do zero, feche o app e apague a pasta.
 - [TradingView](https://www.tradingview.com/): widget do gráfico.
 
 Os dados são apenas informativos e podem ter atraso ou falhas. Este programa não é recomendação de investimento e não tem vínculo com os serviços acima.
-
-
