@@ -1188,6 +1188,29 @@ function configurarBotoesJanela() {
 	}
 }
 
+/** Controles com ação própria ao pressionar: não arrastam a janela. */
+const SELETOR_SEM_ARRASTE = 'button, input, select, textarea, a, label';
+
+/** Clique na barra de rolagem de um elemento (ex.: lista de alertas), que não é arraste. */
+function cliqueNaBarraDeRolagem(evento) {
+	const alvo = evento.target;
+	return (alvo.scrollHeight > alvo.clientHeight && evento.offsetX >= alvo.clientWidth)
+		|| (alvo.scrollWidth > alvo.clientWidth && evento.offsetY >= alvo.clientHeight);
+}
+
+/**
+ * Só no app: o botão principal pressionado na região de arrasto pede ao Python que mova a
+ * janela até o botão ser solto, encaixando nas bordas da tela (bordas_janela.py). Os
+ * controles e as barras de rolagem ficam de fora.
+ */
+function aoPressionarParaArrastar(evento) {
+	if (evento.button !== 0) return;
+	const alvo = evento.target;
+	if (!(alvo instanceof Element) || !alvo.closest('.regiao-arraste')) return;
+	if (alvo.closest(SELETOR_SEM_ARRASTE) || cliqueNaBarraDeRolagem(evento)) return;
+	chamarApi('iniciar_arraste');
+}
+
 // ---------------------------------------------------------------------------
 // Diálogo (substitui o jquery-confirm). Mensagens ficam em fila.
 // ---------------------------------------------------------------------------
@@ -1537,6 +1560,7 @@ function registrarEventos() {
 	// Um clique sem mover o mouse (ex.: fechar o alarme com o ponteiro já sobre o OK) também é atividade.
 	// Não retoma a pausa por inatividade: quem retoma é o movimento ou o clique no ⏸.
 	document.addEventListener('pointerdown', registrarAtividade, { passive: true });
+	if (isPyWebView) document.addEventListener('mousedown', aoPressionarParaArrastar, { passive: true });
 	document.addEventListener('visibilitychange', () => {
 		if (document.visibilityState === 'hidden') gravarEstado(true);
 		else if (ativo) adquirirWakeLock();

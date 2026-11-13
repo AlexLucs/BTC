@@ -54,8 +54,8 @@ input {
     cursor: text;
 }
 
-/* Região de arrasto da janela sem moldura (pywebview) */
-.pywebview-drag-region {
+/* Região de arrasto da janela do app (script.js: aoPressionarParaArrastar) */
+.regiao-arraste {
     position: fixed;
     top: 0;
     height: 100%;

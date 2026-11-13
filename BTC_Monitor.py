@@ -23,6 +23,7 @@ from pathlib import Path  # noqa: E402
 import webview  # noqa: E402
 
 import topo_janela  # noqa: E402
+from bordas_janela import Arrastador, area_livre  # noqa: E402
 from alertas_store import AlertasInvalidosError, RepositorioAlertas  # noqa: E402
 from primeiro_preco import BuscaPrimeiroPreco  # noqa: E402
 from servidor_local import PORTA as PORTA_LOCAL  # noqa: E402
@@ -122,22 +123,24 @@ def altura_da_janela(compacto: bool) -> int:
 
 
 def posicao_centralizada(monitor, largura: int = WINDOW_WIDTH, altura: int = WINDOW_HEIGHT) -> tuple[int, int]:
-    """Calcula o canto superior esquerdo que centraliza a janela no monitor."""
+    """Calcula o canto superior esquerdo que centraliza a janela na área livre do monitor."""
+    area = area_livre(monitor)
     return (
-        monitor.x + (monitor.width - largura) // 2,
-        monitor.y + (monitor.height - altura) // 2,
+        area.esquerda + (area.largura - largura) // 2,
+        area.topo + (area.altura - altura) // 2,
     )
 
 
 def posicao_dentro_do_monitor(x: int, y: int, largura: int, altura: int, monitor) -> tuple[int, int]:
-    """Desloca (x, y) o mínimo necessário para a janela inteira caber no monitor.
+    """Desloca (x, y) o mínimo necessário para a janela inteira caber na área livre do monitor.
 
-    Se a janela for maior que o monitor, prevalece o canto superior esquerdo (a barra
-    de botões continua alcançável). Usa a área total do monitor (webview.screens não
-    informa a área livre da barra de tarefas).
+    A área livre exclui a barra de tarefas (ver bordas_janela.area_livre; sem ela, vale a
+    área total). Se a janela for maior que a área, prevalece o canto superior esquerdo (a
+    barra de botões continua alcançável).
     """
-    x = max(monitor.x, min(x, monitor.x + monitor.width - largura))
-    y = max(monitor.y, min(y, monitor.y + monitor.height - altura))
+    area = area_livre(monitor)
+    x = max(area.esquerda, min(x, area.direita - largura))
+    y = max(area.topo, min(y, area.base - altura))
     return x, y
 
 
@@ -213,6 +216,7 @@ class ExposedApi:
         self._repositorio = repositorio
         self._metricas = metricas
         self._compacto = compacto
+        self._arrastador = Arrastador(self._handle_janela)
 
     def _vincular(self, janela: webview.Window) -> None:
         self._janela = janela
@@ -286,6 +290,17 @@ class ExposedApi:
             except OSError:
                 logger.exception("Falha ao localizar a janela")
         return self._handle
+
+    def iniciar_arraste(self) -> bool:
+        """Começa a arrastar a janela com o mouse, com bordas magnéticas.
+
+        Chamado pelo script.js ao pressionar o botão principal na região de arrasto. O
+        arraste segue numa thread própria até o botão ser solto (ver bordas_janela.py) e
+        este método retorna na hora: False se já houver um arraste em andamento.
+        Substitui o easy_drag do pywebview, que não respeita as bordas da tela.
+        """
+        with self._metricas.medir("iniciar_arraste"):
+            return self._arrastador.iniciar()
 
     def definir_topo(self, fixar: bool) -> bool:
         """Fixa ou desafixa a janela do app no topo e retorna o estado final.
@@ -513,6 +528,9 @@ def abrir_janela() -> None:
         width=WINDOW_WIDTH,
         height=altura,
         frameless=True,
+        # O arraste é do app (iniciar_arraste + bordas_janela.py), com bordas magnéticas.
+        # O easy_drag do pywebview move a janela pelo JS sem noção das bordas da tela.
+        easy_drag=False,
         background_color="#000000",
         x=x,
         y=y,

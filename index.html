@@ -53,8 +53,10 @@
 </head>
 
 <body>
-    <!-- Container principal; a classe permite arrastar a janela sem moldura do pywebview -->
-    <div id="conteudo" class="pywebview-drag-region">
+    <!-- Container principal; a classe marca onde se arrasta a janela do app (script.js:
+         aoPressionarParaArrastar). Não usar "pywebview-drag-region": ligaria o arraste
+         pelo JS do pywebview, que ignora as bordas da tela. -->
+    <div id="conteudo" class="regiao-arraste">
         <!-- Controles da janela (ocultos por padrão; script.js exibe os que se aplicam) -->
         <div class="botao">
             <button type="button" class="btns" id="centralizar-btn" title="Centralizar" aria-label="Centralizar">▣</button>
