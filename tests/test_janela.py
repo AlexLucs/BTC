@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +19,11 @@ import BTC_Monitor as app  # noqa: E402
 
 MONITOR = SimpleNamespace(x=0, y=0, width=1920, height=1080)
 MONITOR_DIREITA = SimpleNamespace(x=1920, y=0, width=1280, height=1024)
+# Como o pywebview 6.2.1 no Windows: "frame" é o Screen.WorkingArea do WinForms (sem a
+# barra de tarefas, aqui embaixo, com 40 px).
+MONITOR_COM_BARRA = SimpleNamespace(
+    x=0, y=0, width=1920, height=1080, frame=SimpleNamespace(X=0, Y=0, Width=1920, Height=1040)
+)
 
 
 class JanelaFalsa:
@@ -186,3 +192,104 @@ def test_falha_ao_corrigir_o_tamanho_nao_derruba_a_abertura(api):
     janela.events = SimpleNamespace(shown=EventoFalso())
     app.registrar_ajuste_de_tamanho(janela, api)
     janela.events.shown.disparar()  # não levanta
+
+
+# ---------------------------------------------------------------------------
+# Área livre (barra de tarefas) e arraste
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("x", "y", "altura", "esperado"), [
+    (100, 100, 810, (100, 100)),      # cabe: não mexe
+    (100, 900, 810, (100, 230)),      # sobre a barra de tarefas: sobe até a base dela
+    (100, 700, 388, (100, 652)),      # idem no modo compacto
+])
+def test_posicao_dentro_do_monitor_respeita_a_barra_de_tarefas(x, y, altura, esperado):
+    assert app.posicao_dentro_do_monitor(x, y, app.WINDOW_WIDTH, altura, MONITOR_COM_BARRA) == esperado
+
+
+def test_posicao_centralizada_usa_a_area_livre():
+    assert app.posicao_centralizada(MONITOR_COM_BARRA) == (710, 115)
+    assert app.posicao_centralizada(MONITOR_COM_BARRA, 500, 388) == (710, 326)
+
+
+def test_expandir_perto_da_barra_de_tarefas_sobe_acima_dela(api, monkeypatch):
+    monkeypatch.setattr(app, "webview", SimpleNamespace(screens=[MONITOR_COM_BARRA]))
+    janela = JanelaFalsa(100, 640, altura=388)
+    api._vincular(janela)
+    api._compacto = True
+    assert api.definir_compacto(False) is True
+    assert janela.chamadas == [("resize", 500, 810), ("move", 100, 230)]
+
+
+def test_centralizar_usa_a_area_livre(api, monkeypatch):
+    monkeypatch.setattr(app, "webview", SimpleNamespace(screens=[MONITOR_COM_BARRA]))
+    janela = JanelaFalsa(100, 100)
+    api._vincular(janela)
+    api.centralizar()
+    assert janela.chamadas == [("move", 710, 115)]
+
+
+class ArrastadorFalso:
+    def __init__(self, resposta: bool) -> None:
+        self.resposta = resposta
+        self.pedidos = 0
+
+    def iniciar(self) -> bool:
+        self.pedidos += 1
+        return self.resposta
+
+
+@pytest.mark.parametrize("resposta", [True, False])
+def test_iniciar_arraste_repassa_ao_arrastador(api, resposta):
+    api._arrastador = ArrastadorFalso(resposta)
+    assert api.iniciar_arraste() is resposta
+    assert api._arrastador.pedidos == 1
+
+
+def test_arrastador_usa_o_handle_da_janela(api):
+    """O arrastador acha a janela pelo mesmo caminho da fixação no topo (título + PID)."""
+    assert api._arrastador._obter_hwnd == api._handle_janela
+
+
+def test_arraste_expoe_so_o_metodo_ao_js(api):
+    publicos = {nome for nome in dir(api) if not nome.startswith("_")}
+    assert "iniciar_arraste" in publicos
+    assert not {"arrastador", "arraste"} & publicos
+
+
+class EventosFalsos:
+    """Qualquer evento pedido (shown, closing, loaded...) vira um EventoFalso."""
+
+    def __getattr__(self, nome: str) -> EventoFalso:
+        evento = EventoFalso()
+        setattr(self, nome, evento)
+        return evento
+
+
+def test_janela_e_criada_sem_o_easy_drag(monkeypatch, config, tmp_path):
+    """O arraste do pywebview ignora as bordas da tela; o app usa o próprio."""
+    opcoes: dict = {}
+    janela = JanelaFalsa(0, 0)
+    janela.events = EventosFalsos()
+
+    def criar_janela(*_args, **kwargs):
+        opcoes.update(kwargs)
+        return janela
+
+    monkeypatch.setattr(app, "webview", SimpleNamespace(
+        screens=[MONITOR_COM_BARRA], create_window=criar_janela, start=lambda **_kwargs: None))
+    monkeypatch.setattr(app, "PASTA_WEBVIEW", tmp_path / "webview")
+    app.abrir_janela()
+    assert opcoes["frameless"] is True
+    assert opcoes["easy_drag"] is False
+    # Sem posição salva: centralizada na área livre.
+    assert (opcoes["x"], opcoes["y"]) == (710, 115)
+
+
+def test_index_nao_usa_a_regiao_de_arrasto_do_pywebview():
+    """A classe "pywebview-drag-region" ligaria o arraste pelo JS do pywebview mesmo com
+    easy_drag=False (ele sempre escuta o DRAG_REGION_SELECTOR)."""
+    html = (RAIZ / "index.html").read_text(encoding="utf-8")
+    assert re.search(r'class="[^"]*pywebview-drag-region', html) is None
+    assert 'class="regiao-arraste"' in html

@@ -1140,3 +1140,112 @@ def test_pausa_e_alertas_ficam_no_bloco_compacto(navegador, largura, altura):
     assert botao["y"] + botao["height"] <= ab, (botao, medida)
     assert not erros, erros
     contexto.close()
+
+
+# Conta os pedidos de arraste ao Python (bordas_janela.py move a janela até o botão ser solto).
+API_INICIAR_ARRASTE = """
+window.__arrastes = 0;
+window.addEventListener('pywebviewready', () => {
+    window.pywebview.api.iniciar_arraste = async () => { window.__arrastes++; return true; };
+});
+"""
+
+PRESSIONAR = """([seletor, botao]) => {
+    const alvo = document.querySelector(seletor);
+    const caixa = alvo.getBoundingClientRect();
+    alvo.dispatchEvent(new MouseEvent('mousedown', {
+        bubbles: true, button: botao, clientX: caixa.left + 2, clientY: caixa.top + 2,
+    }));
+}"""
+
+
+def arrastes(pagina) -> int:
+    pagina.wait_for_timeout(100)  # chamarApi é assíncrona
+    return pagina.evaluate("window.__arrastes")
+
+
+def test_app_pede_o_arraste_ao_python_so_fora_dos_controles(navegador):
+    contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=False, com_alertas=False,
+                                          user_agent="Mozilla/5.0 pywebview")
+    contexto.add_init_script(PYWEBVIEW_TARDIO)
+    contexto.add_init_script(API_INICIAR_ARRASTE)
+    pagina.goto(INDEX_URL)
+    esperar_carregamento(pagina)
+    pagina.wait_for_function("typeof window.pywebview?.api?.iniciar_arraste === 'function'")
+
+    # Mouse de verdade sobre o preço: um pedido por pressionamento.
+    caixa = pagina.locator("#info-price").bounding_box()
+    pagina.mouse.move(caixa["x"] + caixa["width"] / 2, caixa["y"] + caixa["height"] / 2)
+    pagina.mouse.down()
+    pagina.mouse.up()
+    assert arrastes(pagina) == 1
+
+    # Botão direito ou do meio: não arrasta.
+    for botao in (1, 2):
+        pagina.evaluate(PRESSIONAR, ["#info-price", botao])
+    assert arrastes(pagina) == 1
+
+    # Controles têm ação própria: não arrastam.
+    pagina.evaluate("alternarTelaAlerta()")
+    for seletor in ("#compacto-btn", "#close-btn", "#valorAlerta", "#salvarBotao"):
+        pagina.evaluate(PRESSIONAR, [seletor, 0])
+    assert arrastes(pagina) == 1
+
+    # O fundo da tela de alertas arrasta.
+    pagina.evaluate(PRESSIONAR, [".modal-content p", 0])
+    assert arrastes(pagina) == 2
+
+    # O diálogo fica fora da região de arrasto.
+    pagina.evaluate("aviso('Teste', 'mensagem')")
+    pagina.evaluate(PRESSIONAR, ["#dialogo-titulo", 0])
+    assert arrastes(pagina) == 2
+    assert not erros, erros
+    contexto.close()
+
+
+def test_clique_na_barra_de_rolagem_da_lista_nao_arrasta(navegador):
+    muitos = [{"id": f"a{i}", "valor": 1000 + i, "tipo": "desativado"} for i in range(40)]
+    contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=False, com_alertas=False,
+                                          user_agent="Mozilla/5.0 pywebview")
+    contexto.add_init_script(PYWEBVIEW_TARDIO.replace("carregar_alerta: async () => []",
+                                                      f"carregar_alerta: async () => {json.dumps(muitos)}"))
+    contexto.add_init_script(API_INICIAR_ARRASTE)
+    pagina.goto(INDEX_URL)
+    esperar_carregamento(pagina)
+    pagina.wait_for_function("typeof window.pywebview?.api?.iniciar_arraste === 'function'")
+    pagina.wait_for_function("alertas.length === 40")
+    # O Chromium sem janela do Playwright esconde as barras de rolagem (a largura delas é 0).
+    # O pressionamento vai logo à direita da área interna da lista, onde fica a barra no Edge.
+    pagina.evaluate("alternarTelaAlerta()")
+    lista = pagina.evaluate("""() => {
+        const lista = document.getElementById('listaAlertas');
+        const caixa = lista.getBoundingClientRect();
+        return { rola: lista.scrollHeight > lista.clientHeight, x: caixa.left, y: caixa.top, interna: lista.clientWidth };
+    }""")
+    assert lista["rola"], lista
+    pagina.evaluate("""([x, y]) => document.getElementById('listaAlertas').dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, button: 0, clientX: x, clientY: y }))""",
+                    [lista["x"] + lista["interna"] + 2, lista["y"] + 10])
+    assert arrastes(pagina) == 0
+    # Controle: o mesmo pressionamento dentro da área da lista arrasta.
+    pagina.evaluate("""([x, y]) => document.getElementById('listaAlertas').dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, button: 0, clientX: x, clientY: y }))""",
+                    [lista["x"] + lista["interna"] - 20, lista["y"] + 10])
+    assert arrastes(pagina) == 1
+    assert not erros, erros
+    contexto.close()
+
+
+def test_navegador_nao_pede_arraste(navegador):
+    """Fora do app (sem "pywebview" no user agent), nada de arraste, mesmo com uma API presente."""
+    contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=False, com_alertas=False)
+    contexto.add_init_script("""
+        window.__arrastes = 0;
+        window.pywebview = { api: { iniciar_arraste: async () => { window.__arrastes++; } } };
+    """)
+    pagina.goto(INDEX_URL)
+    esperar_carregamento(pagina)
+    pagina.evaluate(PRESSIONAR, ["#info-price", 0])
+    assert arrastes(pagina) == 0
+    assert not erros, erros
+    contexto.close()
