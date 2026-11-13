@@ -211,3 +211,26 @@ def test_texto_do_bloco_nunca_fecha_a_tag():
     bloco = html[html.index('">') + 2:html.index("</script>")]
     assert "<" not in bloco
     assert json.loads(bloco) == [{"symbol": "</script><img src=x>"}]
+
+
+def test_tag_html_do_modo_compacto_existe_no_index():
+    """marcar_compacto procura a linha exata do <html>: mudá-la no HTML exige mudar TAG_HTML."""
+    html = (RAIZ / "index.html").read_text(encoding="utf-8")
+    assert html.count(servidor_local.TAG_HTML) == 1
+    assert servidor_local.TAG_HTML_COMPACTO not in html  # o padrão do arquivo é o modo completo
+    assert servidor_local.marcar_compacto(html).count(servidor_local.TAG_HTML_COMPACTO) == 1
+
+
+def test_pagina_sai_com_a_classe_do_modo_atual(servidor):
+    """O modo é consultado a cada pedido: o ↻ recarrega no modo em que a janela está."""
+    modo = {"compacto": False}
+    s = servidor(BuscaFalsa(), modo_compacto=lambda: modo["compacto"])
+    assert servidor_local.TAG_HTML_COMPACTO.encode() not in pedir(s.url)[2]
+    modo["compacto"] = True
+    assert servidor_local.TAG_HTML_COMPACTO.encode() in pedir(s.url)[2]
+    assert servidor_local.TAG_HTML_COMPACTO.encode() in pedir(s.url + "index.html")[2]
+
+
+def test_sem_modo_compacto_informado_a_pagina_sai_no_modo_completo(servidor):
+    s = servidor(BuscaFalsa())
+    assert servidor_local.TAG_HTML_COMPACTO.encode() not in pedir(s.url)[2]

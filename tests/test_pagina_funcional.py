@@ -168,6 +168,66 @@ def test_inatividade_pausa_sem_alerta_ativo(navegador):
     assert _inatividade(navegador, SO_DESATIVADOS) is False
 
 
+@pytest.mark.parametrize("evento", ["new MouseEvent('mousemove')", "new PointerEvent('pointerdown')"])
+def test_apos_um_alarme_a_inatividade_espera_nova_atividade(navegador, evento):
+    """Disparou um alarme e o usuário não voltou: não pausa por inatividade, nem depois de
+    o alarme fechar (o alerta vira desativado). Só conta ~17 min a partir da próxima atividade;
+    um clique sem mover o mouse também conta."""
+    contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=False,
+                                          com_alertas=ALERTA_QUE_DISPARARIA)
+    pagina.clock.install()
+    pagina.goto(INDEX_URL)
+    esperar_carregamento(pagina)
+    for _ in range(20):  # silêncio inicial (5 s) + checagem (1 s)
+        if pagina.evaluate("document.getElementById('dialogo').open"):
+            break
+        pagina.clock.run_for(1000)
+    assert pagina.evaluate("alertaAberto"), "o alarme não disparou"
+    # Fecha sem nenhum evento de usuário: o alerta vira desativado.
+    pagina.evaluate("document.getElementById('dialogo').close()")
+    for _ in range(50):  # o evento "close" do <dialog> chega numa tarefa à parte
+        if pagina.evaluate("!existeAlertaAtivo(alertas)"):
+            break
+        pagina.clock.run_for(100)
+        pagina.wait_for_timeout(20)
+    assert pagina.evaluate("!existeAlertaAtivo(alertas)")
+
+    pagina.clock.fast_forward(1_001_000)  # LIMITE_INATIVIDADE = 1.000 s
+    pagina.clock.run_for(2000)
+    assert pagina.evaluate("ativo") is True  # sem atividade depois do alarme: não pausa
+
+    pagina.evaluate(f"document.dispatchEvent({evento})")
+    pagina.clock.fast_forward(500_000)
+    pagina.clock.run_for(2000)
+    assert pagina.evaluate("ativo") is True  # ainda dentro dos ~17 min após a atividade
+    pagina.clock.fast_forward(501_000)
+    pagina.clock.run_for(2000)
+    assert pagina.evaluate("ativo") is False  # ~17 min depois da atividade: pausa
+    contexto.close()
+
+
+@pytest.mark.parametrize(("alertas", "continua"), [(SO_DESATIVADOS, True), (ALERTA_ATIVO_DISTANTE, True), (False, False)])
+def test_falhas_seguidas_so_pausam_sem_alertas_cadastrados(navegador, alertas, continua):
+    """Com qualquer alerta cadastrado, MAX_FALHAS não pausa: o preço vira "Sem Dados" e o ciclo
+    segue tentando, para os alertas voltarem a valer quando a internet voltar."""
+    rede = RedeSimulada()
+    rede.falhar_binance = True
+    contexto, pagina, erros = nova_pagina(navegador, rede, acelerar=True, com_alertas=alertas)
+    pagina.goto(INDEX_URL)
+    esperar_carregamento(pagina)
+    if continua:
+        pagina.wait_for_function("falhasBRL >= 13", timeout=20000)  # passou de MAX_FALHAS (10)
+        assert pagina.evaluate("ativo") is True
+        assert texto(pagina, "#info-price") == "▶Sem Dados◀"
+        assert pagina.evaluate("getComputedStyle(document.getElementById('overlay')).display") == "none"
+        rede.falhar_binance = False  # a internet volta: o preço volta sem nenhum clique
+        pagina.wait_for_function("falhasBRL === 0 && Number.isFinite(ultimoPrecoBRL)", timeout=10000)
+    else:
+        pagina.wait_for_function("!ativo", timeout=20000)
+        assert pagina.evaluate("falhasBRL") >= 10 and pagina.evaluate("pausaManual") is True
+    contexto.close()
+
+
 def test_grafico_espera_a_ponte_do_python(navegador):
     contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=False, com_alertas=False,
                                           user_agent="Mozilla/5.0 pywebview")
@@ -423,14 +483,14 @@ def test_pagina_de_producao_funciona_com_o_substituto_vazio(navegador, tmp_path)
 
 
 def test_navegador_mostra_e_oculta_o_grafico(navegador):
-    """No navegador aparecem Alertas, Gráfico (⇄) e Pausar, sem sobreposição; o gráfico abre
-    oculto e ⇄ o mostra e o oculta."""
+    """No navegador aparecem Alertas, Gráfico (⇄), Modo compacto e Pausar, sem sobreposição; o
+    gráfico abre oculto e ⇄ o mostra e o oculta."""
     contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=False, com_alertas=False)
     pagina.goto(INDEX_URL)
     esperar_carregamento(pagina)
     visiveis = pagina.evaluate("[...document.querySelectorAll('.btns')].filter(b => getComputedStyle(b).display !== 'none').map(b => b.id)")
-    assert sorted(visiveis) == ["alerta-btn", "grafico-btn", "pausar-btn"]
-    caixas = [pagina.locator(f"#{id_}").bounding_box() for id_ in ("alerta-btn", "grafico-btn", "pausar-btn")]
+    assert sorted(visiveis) == ["alerta-btn", "compacto-btn", "grafico-btn", "pausar-btn"]
+    caixas = [pagina.locator(f"#{id_}").bounding_box() for id_ in ("alerta-btn", "grafico-btn", "compacto-btn", "pausar-btn")]
     for esquerda, direita in zip(caixas, caixas[1:]):
         assert esquerda["x"] + esquerda["width"] <= direita["x"], caixas  # lado a lado, sem sobrepor
 
@@ -736,5 +796,347 @@ def test_vigia_registra_a_thread_da_pagina_ocupada_na_abertura(navegador):
     bloqueios = pagina.evaluate("Metricas.relatorio('teste').bloqueios")
     assert any(380 <= inicio <= 470 and duracao >= 55 for inicio, duracao in bloqueios), bloqueios
     assert pagina.evaluate("Metricas.relatorio('teste').bloqueios") == []  # zera a cada relatório
+    assert not erros, erros
+    contexto.close()
+
+
+# ---------------------------------------------------------------------------
+# Modo compacto
+# ---------------------------------------------------------------------------
+
+MODO_COMPACTO = """() => {
+    const visivel = s => getComputedStyle(document.querySelector(s)).display !== 'none';
+    return {
+        classe: document.documentElement.classList.contains('compacto'),
+        botao: document.getElementById('compacto-btn').textContent,
+        dica: document.getElementById('compacto-btn').title,
+        logo: visivel('#info-logo'), tabela: visivel('.bottom-left-info'),
+        faixa: visivel('#info-faixa'), botaoGrafico: visivel('#grafico-btn'),
+        faixaMaxima: document.getElementById('faixaMaxima').textContent,
+        faixaMinima: document.getElementById('faixaMinima').textContent,
+        maxima: document.getElementById('highPrice').textContent,
+        minima: document.getElementById('lowPrice').textContent,
+        iframes: document.querySelectorAll('#grafico iframe').length,
+    };
+}"""
+
+# Registra as chamadas a definir_compacto; a 1ª demora mais que as seguintes, para que, sem
+# a fila do script.js, as respostas chegassem fora de ordem.
+API_DEFINIR_COMPACTO = """
+window.__compacto = [];
+window.addEventListener('pywebviewready', () => {
+    let n = 0;
+    window.pywebview.api.definir_compacto = ativo => new Promise(resolver => {
+        const atraso = n++ === 0 ? 300 : 10;
+        setTimeout(() => { window.__compacto.push(ativo); resolver(true); }, atraso);
+    });
+});
+"""
+
+
+def test_navegador_modo_compacto_troca_o_layout_e_guarda_o_grafico(navegador):
+    """No navegador, ⊟ só muda o layout: sem logo, tabela e ⇄, com máxima e mínima no rodapé;
+    o gráfico aberto sai e volta com ⊞."""
+    contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=False, com_alertas=False)
+    pagina.goto(INDEX_URL)
+    esperar_carregamento(pagina)
+    inicial = pagina.evaluate(MODO_COMPACTO)
+    assert (inicial["classe"], inicial["botao"], inicial["faixa"], inicial["tabela"], inicial["logo"]) == (
+        False, "⊟", False, True, True)
+    pagina.click("#grafico-btn")
+    pagina.wait_for_function("document.querySelector('#grafico iframe') !== null", timeout=10000)
+
+    pagina.click("#compacto-btn")
+    compacto = pagina.evaluate(MODO_COMPACTO)
+    assert compacto["classe"] and compacto["botao"] == "⊞" and compacto["dica"] == "Modo completo"
+    assert not compacto["logo"] and not compacto["tabela"] and not compacto["botaoGrafico"]
+    assert compacto["faixa"] and compacto["iframes"] == 0
+    assert compacto["faixaMaxima"] == compacto["maxima"] != ""
+    assert compacto["faixaMinima"] == compacto["minima"] != ""
+    assert pagina.viewport_size == {"width": 500, "height": 810}  # no navegador a janela não muda
+
+    pagina.click("#compacto-btn")
+    pagina.wait_for_function("document.querySelector('#grafico iframe') !== null", timeout=10000)
+    completo = pagina.evaluate(MODO_COMPACTO)
+    assert not completo["classe"] and completo["botao"] == "⊟" and completo["tabela"] and not completo["faixa"]
+    assert not erros, erros
+    contexto.close()
+
+
+def test_rodape_do_modo_compacto_acompanha_estado_salvo_e_sem_dados(navegador):
+    rede = RedeSimulada()
+    rede.falhar_binance = True
+    contexto, pagina, erros = nova_pagina(navegador, rede, acelerar=True, com_alertas=False)
+    contexto.add_init_script(f"localStorage.setItem('ultimoEstado', {json.dumps(json.dumps(ESTADO_SALVO))})")
+    pagina.goto(INDEX_URL)
+    pagina.click("#compacto-btn")
+    salvo = pagina.evaluate(MODO_COMPACTO)
+    assert salvo["faixaMaxima"] == salvo["maxima"] and "440.000" in salvo["faixaMaxima"]
+    assert salvo["faixaMinima"] == salvo["minima"] and "430.000" in salvo["faixaMinima"]
+    pagina.wait_for_function("document.getElementById('faixaMaxima').textContent === '—'", timeout=15000)
+    assert pagina.evaluate("document.getElementById('faixaMinima').textContent") == "—"
+    contexto.close()
+
+
+def test_app_pede_o_redimensionamento_ao_python_na_ordem_dos_cliques(navegador):
+    contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=False, com_alertas=False,
+                                          user_agent="Mozilla/5.0 pywebview")
+    contexto.add_init_script(PYWEBVIEW_TARDIO)
+    contexto.add_init_script(API_DEFINIR_COMPACTO)
+    pagina.goto(INDEX_URL)
+    esperar_carregamento(pagina)
+    pagina.wait_for_function("typeof window.pywebview?.api?.definir_compacto === 'function'")
+    for _ in range(3):
+        pagina.click("#compacto-btn")
+    pagina.wait_for_function("window.__compacto.length === 3", timeout=5000)
+    assert pagina.evaluate("window.__compacto") == [True, False, True]
+    assert pagina.evaluate(MODO_COMPACTO)["classe"] is True
+    # No app, o botão fica à esquerda do minimizar, sem sobrepor.
+    compacto, minimizar = (pagina.locator(f"#{i}").bounding_box() for i in ("compacto-btn", "minimize-btn"))
+    assert compacto["x"] + compacto["width"] <= minimizar["x"]
+    assert not erros, erros
+    contexto.close()
+
+
+def test_app_abre_no_modo_compacto_salvo_e_tudo_cabe_na_janela(navegador):
+    """O servidor local entrega o HTML com a classe: a página já abre no layout compacto, sem
+    montar o gráfico (nem com ele configurado como visível) e sem nada cortado em 500x388."""
+    from apoio_pagina import ServidorDaPagina
+
+    servidor = ServidorDaPagina(BuscaSimulada("dados"), modo_compacto=lambda: True)
+    contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=False, com_alertas=False,
+                                          user_agent="Mozilla/5.0 pywebview")
+    pagina.set_viewport_size({"width": 500, "height": 388})
+    contexto.add_init_script(PYWEBVIEW_TARDIO)
+    com_grafico_ao_abrir(contexto)
+    try:
+        pagina.goto(servidor.url)
+        esperar_carregamento(pagina)
+        estado = pagina.evaluate(MODO_COMPACTO)
+        assert estado["classe"] and estado["botao"] == "⊞" and estado["faixa"] and not estado["tabela"]
+        fim = pagina.evaluate("document.getElementById('info-faixa').getBoundingClientRect().bottom")
+        assert fim <= 388 - 8, fim
+        assert pagina.evaluate("document.documentElement.scrollHeight") <= 388
+        pagina.wait_for_function("'nav_load' in Metricas.marcos")
+        pagina.wait_for_timeout(800)  # passa o momento em que o gráfico seria montado
+        assert pagina.evaluate(MODO_COMPACTO)["iframes"] == 0
+        # O relatório de abertura não espera o gráfico que não é montado.
+        pagina.wait_for_function("window.__relatorios.some(r => r.motivo === 'abertura')", timeout=5000)
+        assert not erros, erros
+    finally:
+        contexto.close()
+        servidor.fechar()
+
+
+# ---------------------------------------------------------------------------
+# Seta de direção
+# ---------------------------------------------------------------------------
+
+POSICAO_DA_SETA = """() => {
+    const p = document.getElementById('info-percent').getBoundingClientRect();
+    const s = document.getElementById('info-seta');
+    return { esquerda: p.left, texto: s.textContent, neutra: s.classList.contains('seta-neutra') };
+}"""
+
+
+@pytest.mark.parametrize("compacto", [False, True])
+def test_seta_comeca_neutra_e_nao_desloca_o_percentual(navegador, compacto):
+    """O estado salvo já aparece com ↔, e trocar a seta (↔, ↑, ↓ ou nenhuma) não move o %."""
+    rede = RedeSimulada()
+    rede.segurar_binance = True  # só o estado salvo e as chamadas abaixo mexem na tela
+    contexto, pagina, erros = nova_pagina(navegador, rede, acelerar=False, com_alertas=False)
+    contexto.add_init_script(f"localStorage.setItem('ultimoEstado', {json.dumps(json.dumps(ESTADO_SALVO))})")
+    pagina.goto(INDEX_URL)
+    pagina.wait_for_function("document.getElementById('tela-carregamento').style.display === 'none'")
+    if compacto:
+        pagina.click("#compacto-btn")
+    pagina.evaluate("document.fonts.ready")
+    inicial = pagina.evaluate(POSICAO_DA_SETA)
+    assert (inicial["texto"], inicial["neutra"]) == ("↔", True)
+
+    posicoes = []
+    # A variação fica igual (-2.50%): só a seta muda.
+    for preco in (432_100, 432_100, 433_000, 431_000):
+        pagina.evaluate(f"exibirBRL({{ preco: {preco}, variacao: -2.5, maxima: 440000, minima: 430000 }})")
+        posicoes.append(pagina.evaluate(POSICAO_DA_SETA))
+    assert [p["texto"] for p in posicoes] == ["↔", "↔", "↑", "↓"]
+    pagina.evaluate("ui.seta.textContent = ''")  # como no "Sem Dados"
+    posicoes.append(pagina.evaluate(POSICAO_DA_SETA))
+    assert {p["esquerda"] for p in posicoes} == {inicial["esquerda"]}, posicoes
+    assert not erros, erros
+    contexto.close()
+
+
+# ---------------------------------------------------------------------------
+# Valores salvos e falhas: a mesma regra para todos os campos
+# ---------------------------------------------------------------------------
+
+CAMPOS_POR_FONTE = {
+    "binance": ["#info-price", "#info-usdt", "#highPriceDol", "#faixaMaxima", "#dolar-implicito"],
+    "awesomeapi": ["#dolar-comercial"],
+    "mempool": ["#fastestFee", "#minimumFee"],
+}
+
+
+def esmaecidos(pagina) -> dict:
+    return pagina.evaluate("""seletores => Object.fromEntries(seletores.map(s => {
+        const e = document.querySelector(s);
+        return [s, !!e.closest('.desatualizado')];
+    }))""", [s for lista in CAMPOS_POR_FONTE.values() for s in lista])
+
+
+def falhar_tudo(contexto) -> None:
+    """AwesomeAPI e mempool.space falham (a rota registrada por último tem precedência)."""
+    contexto.route("https://economia.awesomeapi.com.br/**", lambda rota: rota.abort())
+    contexto.route("https://mempool.space/**", lambda rota: rota.abort())
+
+
+def test_dolar_e_taxas_mantem_o_valor_salvo_ate_3_falhas(navegador):
+    """Dólar comercial e taxas mantêm o valor salvo (esmaecido) até 3 falhas seguidas e só então
+    viram "Sem Dados"/"—", já sem o esmaecimento. A Binance fica retida: com ela falhando, o
+    monitoramento pausaria (MAX_FALHAS) antes; o preço tem o próprio teste (resiste_a_falhas)."""
+    rede = RedeSimulada()
+    rede.segurar_binance = True
+    contexto, pagina, erros = nova_pagina(navegador, rede, acelerar=True, com_alertas=False)
+    com_estado_salvo(contexto)
+    falhar_tudo(contexto)
+    pagina.goto(INDEX_URL)
+    esperar_carregamento(pagina)
+    pagina.wait_for_function("falhasDolar >= 1 && falhasTaxas >= 1", timeout=15000)
+    if pagina.evaluate("falhasDolar < 3 && falhasTaxas < 3"):
+        assert texto(pagina, "#info-dolar") == "R$ 5,02 | R$ 5,02"
+        assert texto(pagina, "#fastestFee") == "9,87 sat/vB"
+        assert all(esmaecidos(pagina).values()), esmaecidos(pagina)
+
+    pagina.wait_for_function("falhasDolar >= 3 && falhasTaxas >= 3", timeout=30000)
+    assert texto(pagina, "#dolar-comercial") == "Sem Dados"
+    assert texto(pagina, "#fastestFee") == "—" and texto(pagina, "#minimumFee") == "—"
+    estado = esmaecidos(pagina)
+    assert not estado["#dolar-comercial"] and not estado["#fastestFee"], estado
+    # A Binance ainda não respondeu: preço, USDT e dólar implícito continuam os salvos.
+    assert texto(pagina, "#info-price") == "R$ 432.100,00" and texto(pagina, "#dolar-implicito") == "R$ 5,02"
+    assert all(estado[s] for s in CAMPOS_POR_FONTE["binance"]), estado
+    assert not erros, erros
+    contexto.close()
+
+
+def test_usdt_salvo_resiste_a_falha_depois_que_o_brl_chega(navegador):
+    """O BRL novo tira o BRL do estado salvo, mas não o USDT: uma falha só do USDT mantém o salvo."""
+    rede = RedeSimulada()
+    rede.segurar_binance = True
+    contexto, pagina, erros = nova_pagina(navegador, rede, acelerar=False, com_alertas=False)
+    com_estado_salvo(contexto)
+    pagina.goto(INDEX_URL)
+    esperar_carregamento(pagina)
+    pagina.evaluate("aplicarBRL({ preco: 433000, variacao: -2.5, maxima: 440000, minima: 430000 });"
+                    "registrarFalhaUSD(new Error('teste'))")
+    assert texto(pagina, "#info-usdt") == "US$ 86.000,00"
+    assert esmaecidos(pagina)["#info-usdt"] is True
+    assert esmaecidos(pagina)["#info-price"] is False
+    contexto.close()
+
+
+def test_cada_fonte_tira_o_esmaecimento_dos_seus_campos(navegador):
+    """Com a Binance demorando, o dólar implícito continua com os preços salvos (não vira
+    "Sem Dados"); o comercial e as taxas se atualizam quando as fontes deles respondem."""
+    rede = RedeSimulada()
+    rede.segurar_binance = True
+    contexto, pagina, erros = nova_pagina(navegador, rede, acelerar=False, com_alertas=False)
+    com_estado_salvo(contexto)
+    pagina.goto(INDEX_URL)
+    esperar_carregamento(pagina)
+    pagina.wait_for_function("document.getElementById('fastestFee').textContent === '3,40 sat/vB'")
+    pagina.wait_for_function("document.getElementById('dolar-comercial').textContent.includes('5,01')")
+    assert texto(pagina, "#dolar-implicito") == "R$ 5,02"  # 432.100 / 86.000 (salvos)
+    estado = esmaecidos(pagina)
+    assert estado["#dolar-implicito"] and estado["#info-price"] and estado["#info-usdt"]
+    assert not estado["#dolar-comercial"] and not estado["#fastestFee"]
+
+    rede.liberar_binance()
+    pagina.wait_for_function("!document.getElementById('info-price').classList.contains('desatualizado')")
+    assert not any(esmaecidos(pagina).values()), esmaecidos(pagina)
+    assert texto(pagina, "#dolar-implicito") != "Sem Dados"
+    assert not erros, erros
+    contexto.close()
+
+
+def test_sem_estado_salvo_a_1a_falha_ja_mostra_sem_dados(navegador):
+    contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=False, com_alertas=False)
+    falhar_tudo(contexto)
+    pagina.goto(INDEX_URL)
+    esperar_carregamento(pagina)
+    pagina.wait_for_function("falhasDolar >= 1 && falhasTaxas >= 1", timeout=10000)
+    assert texto(pagina, "#dolar-comercial") == "Sem Dados"
+    assert texto(pagina, "#fastestFee") == "—"
+    contexto.close()
+
+
+# ---------------------------------------------------------------------------
+# Modo compacto no navegador: salvo no localStorage; pausa e alertas presos ao bloco
+# ---------------------------------------------------------------------------
+
+def test_navegador_lembra_o_modo_compacto_ao_recarregar(navegador):
+    contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=False, com_alertas=False)
+    pagina.goto(INDEX_URL)
+    esperar_carregamento(pagina)
+    pagina.click("#compacto-btn")
+    pagina.reload()
+    esperar_carregamento(pagina)
+    estado = pagina.evaluate(MODO_COMPACTO)
+    assert estado["classe"] and estado["botao"] == "⊞"
+    pagina.click("#compacto-btn")
+    pagina.reload()
+    esperar_carregamento(pagina)
+    assert pagina.evaluate(MODO_COMPACTO)["classe"] is False
+    assert not erros, erros
+    contexto.close()
+
+
+def test_app_ignora_o_modo_do_navegador(navegador):
+    """No app, o modo vem do Python (classe no HTML), nunca do localStorage."""
+    contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=False, com_alertas=False,
+                                          user_agent="Mozilla/5.0 pywebview")
+    contexto.add_init_script("localStorage.setItem('modoCompacto', '1');")
+    contexto.add_init_script(PYWEBVIEW_TARDIO)
+    pagina.goto(INDEX_URL)
+    esperar_carregamento(pagina)
+    assert pagina.evaluate(MODO_COMPACTO)["classe"] is False
+    contexto.close()
+
+
+CAIXAS_DO_BLOCO = """() => {
+    const caixa = s => { const r = document.querySelector(s).getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; };
+    return { bloco: caixa('#conteudo'), pausa: caixa('#overlay'), fundo: caixa('#darkback'), alertas: caixa('#modalAlerta'),
+             fimConteudo: caixa('#conteudoMenosBotoes')[3], altura: innerHeight };
+}"""
+
+
+@pytest.mark.parametrize(("largura", "altura"), [(500, 388), (1100, 650), (800, 900)])
+def test_pausa_e_alertas_ficam_no_bloco_compacto(navegador, largura, altura):
+    alertas = [{"id": str(i), "valor": 400_000 + i * 1000, "tipo": "maior"} for i in range(6)]
+    contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=False, com_alertas=alertas)
+    pagina.set_viewport_size({"width": largura, "height": altura})
+    contexto.add_init_script("localStorage.setItem('modoCompacto', '1');")
+    pagina.goto(INDEX_URL)
+    esperar_carregamento(pagina)
+    pagina.click("#pausar-btn")
+    pagina.click("#overlay")
+    pagina.click("#pausar-btn")
+    medida = pagina.evaluate(CAIXAS_DO_BLOCO)
+    (bl, bt, br, bb) = medida["bloco"]
+    # O bloco acaba 10 px abaixo do conteúdo (no navegador, bem antes do fim da janela).
+    assert abs(bb - (medida["fimConteudo"] + 10)) <= 1 and bb <= altura + 1, medida
+    (pl, pt, pr, pb) = medida["pausa"]
+    assert pt == bt + 40 and abs(pb - bb) <= 1, medida  # da barra até o fim do bloco
+    pagina.click("#overlay")
+    pagina.click("#alerta-btn")
+    medida = pagina.evaluate(CAIXAS_DO_BLOCO)
+    (al, at, ar, ab) = medida["alertas"]
+    assert at >= bt + 40 and ab <= bb, medida  # a tela de alertas não passa do bloco
+    (fl, ft, fr, fb) = medida["fundo"]
+    assert abs(fb - bb) <= 1, medida
+    # Só a lista rola: os botões continuam dentro da tela de alertas.
+    botao = pagina.locator("#voltarBotao").bounding_box()
+    assert botao["y"] + botao["height"] <= ab, (botao, medida)
     assert not erros, erros
     contexto.close()
