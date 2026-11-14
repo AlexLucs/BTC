@@ -934,8 +934,14 @@ def test_app_abre_no_modo_compacto_salvo_e_tudo_cabe_na_janela(navegador):
 
 POSICAO_DA_SETA = """() => {
     const p = document.getElementById('info-percent').getBoundingClientRect();
+    const linha = document.querySelector('.percentual').getBoundingClientRect();
     const s = document.getElementById('info-seta');
-    return { esquerda: p.left, texto: s.textContent, neutra: s.classList.contains('seta-neutra') };
+    const caixaSeta = s.getBoundingClientRect();
+    return {
+        esquerda: p.left, texto: s.textContent, neutra: s.classList.contains('seta-neutra'),
+        centroPercentual: p.left + p.width / 2, centroLinha: linha.left + linha.width / 2,
+        setaAposPercentual: caixaSeta.left >= p.right,
+    };
 }"""
 
 
@@ -963,6 +969,10 @@ def test_seta_comeca_neutra_e_nao_desloca_o_percentual(navegador, compacto):
     pagina.evaluate("ui.seta.textContent = ''")  # como no "Sem Dados"
     posicoes.append(pagina.evaluate(POSICAO_DA_SETA))
     assert {p["esquerda"] for p in posicoes} == {inicial["esquerda"]}, posicoes
+    # Só o número é centralizado: a seta fica à direita dele, fora do centro.
+    for posicao in [inicial, *posicoes]:
+        assert abs(posicao["centroPercentual"] - posicao["centroLinha"]) <= 1, posicao
+        assert posicao["setaAposPercentual"], posicao
     assert not erros, erros
     contexto.close()
 
@@ -1247,5 +1257,173 @@ def test_navegador_nao_pede_arraste(navegador):
     esperar_carregamento(pagina)
     pagina.evaluate(PRESSIONAR, ["#info-price", 0])
     assert arrastes(pagina) == 0
+    assert not erros, erros
+    contexto.close()
+
+
+# ---------------------------------------------------------------------------
+# Edição do valor do alerta (clique no valor da tabela)
+# ---------------------------------------------------------------------------
+
+ALERTAS_PARA_EDITAR = [
+    {"id": "a", "valor": 30000, "tipo": "menor"},
+    {"id": "b", "valor": 20000, "tipo": "desativado"},
+    {"id": "c", "valor": 10000, "tipo": "maior"},
+]
+
+LINHAS_DA_TABELA = """() => [...document.querySelectorAll('#alertasTabela tr')].map(tr => ({
+    id: tr.dataset.id,
+    valor: tr.querySelector('.botaoValor')?.textContent ?? null,
+    tipo: tr.querySelector('.botaoTipo').textContent,
+}))"""
+
+
+def abrir_alertas_para_editar(navegador):
+    contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=False,
+                                          com_alertas=ALERTAS_PARA_EDITAR)
+    pagina.goto(INDEX_URL)
+    esperar_carregamento(pagina)
+    pagina.evaluate("alternarTelaAlerta()")
+    return contexto, pagina, erros
+
+
+def editar(pagina, id_alerta: str, valor: str):
+    pagina.click(f'#alertasTabela tr[data-id="{id_alerta}"] .botaoValor')
+    campo = pagina.locator(f'#alertasTabela tr[data-id="{id_alerta}"] .campoEdicaoValor')
+    assert campo.evaluate("c => c === document.activeElement")
+    campo.fill(valor)
+    return campo
+
+
+def salvos(pagina) -> list:
+    return json.loads(pagina.evaluate("localStorage.getItem('alertasjson')"))
+
+
+def test_editar_valor_do_alerta_com_enter_grava_e_reordena(navegador):
+    contexto, pagina, erros = abrir_alertas_para_editar(navegador)
+    campo = editar(pagina, "c", "40000")
+    campo.press("Enter")
+    linhas = pagina.evaluate(LINHAS_DA_TABELA)
+    assert [linha["id"] for linha in linhas] == ["c", "a", "b"]
+    assert salvos(pagina)[0] == {"id": "c", "valor": 40000, "tipo": "maior"}
+    assert pagina.evaluate("alarmesSilenciados") is True  # 15 s, como ao criar ou alterar
+
+    assert not erros, erros
+    contexto.close()
+
+
+def tipo_na_tabela(pagina, id_alerta: str) -> str:
+    return pagina.locator(f'#alertasTabela tr[data-id="{id_alerta}"] .botaoTipo').text_content()
+
+
+@pytest.mark.parametrize("valor, tipo, rotulo", [
+    ("25000", "menor", "Menor ▽"),     # preço (~500 mil) acima do valor: "maior" dispararia
+    ("900000", "maior", "Maior △"),    # preço abaixo do valor: "menor" dispararia
+])
+def test_editar_desativado_reativa_pelo_lado_que_nao_dispara(navegador, valor, tipo, rotulo):
+    contexto, pagina, erros = abrir_alertas_para_editar(navegador)
+    pagina.wait_for_function("Number.isFinite(ultimoPrecoBRL)")
+    editar(pagina, "b", valor).press("Enter")
+    assert {"id": "b", "valor": float(valor), "tipo": tipo} in salvos(pagina)
+    assert tipo_na_tabela(pagina, "b") == rotulo
+    assert not erros, erros
+    contexto.close()
+
+
+@pytest.mark.parametrize("valor, rotulo", [(400_000, "Menor ▽"), (900_000, "Maior △")])
+def test_botao_de_tipo_reativa_pelo_lado_que_nao_dispara(navegador, valor, rotulo):
+    """O ciclo Maior → Menor → Desativado → (lado que não dispara com o preço atual)."""
+    contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=False,
+                                          com_alertas=[{"id": "a", "valor": valor, "tipo": "desativado"}])
+    pagina.goto(INDEX_URL)
+    esperar_carregamento(pagina)
+    pagina.wait_for_function("Number.isFinite(ultimoPrecoBRL)")  # ~500 mil
+    pagina.evaluate("alternarTelaAlerta()")
+    pagina.click('#alertasTabela tr[data-id="a"] .botaoTipo')
+    assert tipo_na_tabela(pagina, "a") == rotulo
+    assert pagina.evaluate("alarmesSilenciados") is True
+    assert not erros, erros
+    contexto.close()
+
+
+@pytest.mark.parametrize("estado_salvo, rotulo", [(True, "Menor ▽"), (False, "Maior △")])
+def test_reativar_sem_preco_novo_usa_o_da_tela_ou_maior(navegador, estado_salvo, rotulo):
+    """Sem preço novo (Binance retida): vale o preço salvo na tela (432.100); sem nenhum, "maior"."""
+    rede = RedeSimulada()
+    rede.segurar_binance = True
+    contexto, pagina, erros = nova_pagina(navegador, rede, acelerar=False,
+                                          com_alertas=[{"id": "a", "valor": 400_000, "tipo": "desativado"}])
+    if estado_salvo:
+        com_estado_salvo(contexto)
+    pagina.goto(INDEX_URL)
+    pagina.wait_for_function("alertas.length === 1")
+    assert pagina.evaluate("Number.isFinite(ultimoPrecoBRL)") is False
+    pagina.evaluate("alternarTipoAlerta('a')")  # sem estado salvo, a tela de carregamento cobre a página
+    assert pagina.evaluate("alertas[0].tipo") == ("menor" if estado_salvo else "maior")
+    pagina.evaluate("alternarTelaAlerta()")
+    assert tipo_na_tabela(pagina, "a") == rotulo
+    assert not erros, erros
+    contexto.close()
+
+
+def test_esc_e_sair_do_campo_cancelam_a_edicao(navegador):
+    contexto, pagina, erros = abrir_alertas_para_editar(navegador)
+    antes = pagina.evaluate(LINHAS_DA_TABELA)
+
+    editar(pagina, "a", "1").press("Escape")
+    assert pagina.evaluate(LINHAS_DA_TABELA) == antes
+    # O botão volta no lugar, com o foco; a tela de alertas continua aberta.
+    assert pagina.evaluate("document.activeElement.classList.contains('botaoValor')")
+    assert pagina.evaluate("modalAlertaAberto()")
+
+    editar(pagina, "b", "5")
+    pagina.click(".modal-content p")  # clicar fora do campo
+    assert pagina.evaluate(LINHAS_DA_TABELA) == antes
+    assert pagina.locator(".campoEdicaoValor").count() == 0
+    assert salvos(pagina) == ALERTAS_PARA_EDITAR
+    assert not erros, erros
+    contexto.close()
+
+
+@pytest.mark.parametrize("valor, mensagem", [
+    ("20000", "Existe um alerta com esse mesmo valor."),  # "d" já é maior com 20.000
+    ("0", "Digite um número válido maior que zero."),
+])
+def test_edicao_recusada_avisa_e_mantem_o_valor(navegador, valor, mensagem):
+    alertas = [*ALERTAS_PARA_EDITAR, {"id": "d", "valor": 20000, "tipo": "maior"}]
+    contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=False, com_alertas=alertas)
+    pagina.goto(INDEX_URL)
+    esperar_carregamento(pagina)
+    pagina.evaluate("alternarTelaAlerta()")
+    antes = pagina.evaluate(LINHAS_DA_TABELA)
+    salvos_antes = salvos(pagina)
+    editar(pagina, "c", valor).press("Enter")
+    pagina.wait_for_function("document.getElementById('dialogo').open")
+    assert pagina.locator("#dialogo-conteudo").text_content() == mensagem
+    assert pagina.evaluate(LINHAS_DA_TABELA) == antes
+    assert salvos(pagina) == salvos_antes
+    assert not erros, erros
+    contexto.close()
+
+
+def test_valor_do_alerta_e_o_campo_de_edicao_nao_arrastam_a_janela(navegador):
+    contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=False, com_alertas=False,
+                                          user_agent="Mozilla/5.0 pywebview")
+    contexto.add_init_script(PYWEBVIEW_TARDIO.replace(
+        "carregar_alerta: async () => []",
+        f"carregar_alerta: async () => {json.dumps(ALERTAS_PARA_EDITAR)}"))
+    contexto.add_init_script(API_INICIAR_ARRASTE)
+    pagina.goto(INDEX_URL)
+    esperar_carregamento(pagina)
+    pagina.wait_for_function("typeof window.pywebview?.api?.iniciar_arraste === 'function'")
+    pagina.wait_for_function("alertas.length === 3")
+    pagina.evaluate("alternarTelaAlerta()")
+    pagina.evaluate(PRESSIONAR, ['#alertasTabela tr[data-id="a"] .botaoValor', 0])
+    pagina.click('#alertasTabela tr[data-id="a"] .botaoValor')
+    pagina.evaluate(PRESSIONAR, ['#alertasTabela .campoEdicaoValor', 0])
+    assert arrastes(pagina) == 0
+    # Controle: o fundo da tela de alertas arrasta.
+    pagina.evaluate(PRESSIONAR, [".modal-content p", 0])
+    assert arrastes(pagina) == 1
     assert not erros, erros
     contexto.close()

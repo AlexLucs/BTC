@@ -194,6 +194,21 @@ def test_preco_vai_no_html_quando_ja_esta_pronto(servidor):
     assert bloco not in pedir(s.url)[2].decode("utf-8")  # nem num 2º "/" (recarga)
 
 
+def test_preco_que_ainda_nao_chegou_nao_segura_o_html(servidor):
+    from primeiro_preco import BuscaPrimeiroPreco  # noqa: PLC0415
+
+    liberar = threading.Event()
+    busca = BuscaPrimeiroPreco(baixar=lambda url, timeout_s: (liberar.wait(5), b"[]")[1])
+    busca.iniciar()
+    s = servidor(busca)
+    inicio = time.perf_counter()
+    corpo = pedir(s.url)[2].decode("utf-8")
+    duracao = time.perf_counter() - inicio
+    liberar.set()
+    assert f'id="{servidor_local.ID_PRECO_NO_HTML}"' not in corpo
+    assert duracao < 1.0, "o HTML saiu sem o preço, sem esperar a requisição terminar"
+
+
 def test_sem_preco_pronto_o_html_vai_sem_o_bloco(servidor):
     s = servidor(BuscaFalsa(None))
     assert f'id="{servidor_local.ID_PRECO_NO_HTML}"' not in pedir(s.url)[2].decode("utf-8")

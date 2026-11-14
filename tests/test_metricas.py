@@ -63,6 +63,16 @@ def test_relatorio_js_valido():
     assert validar_relatorio_js(dados) is dados
 
 
+def test_marco_com_instante_proprio_entra_com_o_tempo_em_que_ocorreu(tmp_path):
+    """A busca do 1º preço começa antes de o registro existir e entrega os marcos depois."""
+    registro = RegistroMetricas(tmp_path, inicio_perf=100.0, inicio_epoch=1000.0, sessao="s1")
+    registro.marcar("preco_python_inicio", 100.045)
+    registro.marcar("preco_python_inicio", 100.9)  # só o 1º instante conta
+    registro.marcar("agora")
+    assert registro._marcos["preco_python_inicio"] == 45.0
+    assert registro._marcos["agora"] > 1000  # sem instante: o de agora (perf_counter atual - 100)
+
+
 def test_registro_grava_jsonl_com_marcos_e_amostras(tmp_path):
     registro = RegistroMetricas(tmp_path, inicio_perf=0.0, inicio_epoch=1000.0, sessao="s1")
     registro.marcar("imports_concluidos")

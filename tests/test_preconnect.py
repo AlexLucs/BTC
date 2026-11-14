@@ -42,7 +42,6 @@ def test_dicas_esperadas_e_antes_dos_recursos():
         ("preconnect", "https://api.binance.com", True),
         ("preconnect", "https://economia.awesomeapi.com.br", True),
         ("preconnect", "https://mempool.space", True),
-        ("preconnect", "https://s3.tradingview.com", False),
         ("dns-prefetch", "https://stream.binance.com", False),
     ]
     # Depois da CSP (que só vale para o que vem depois dela) e antes da fonte e dos scripts.
@@ -91,7 +90,7 @@ def test_comparacao_calcula_medianas_e_ganho(capsys):
         ]
     com = medir_abertura.medianas_do_grupo({"a": sessao(500, 400, 120), "b": sessao(500, 420, 140)})
     sem = medir_abertura.medianas_do_grupo({"c": sessao(500, 600, 330)})
-    assert com == {"primeiro_preco": 910, "rede1:api.binance.com": 130}
+    assert com == {"navegacao": 500, "primeiro_preco": 910, "rede1:api.binance.com": 130}
     medir_abertura.imprimir_comparacao({"com": com, "sem": sem}, {"com": 2, "sem": 1})
     saida = capsys.readouterr().out
     assert "+190" in saida and "+200" in saida and "Pré-conexão" in saida
@@ -127,7 +126,7 @@ def test_tabela_mostra_arquivos_e_leituras(capsys):
                                      "contadores": {"recurso_n:Roboto.woff2": 1}}},
     ]
     com = medir_abertura.medianas_do_grupo({"a": sessao})
-    assert com == {"recurso:Roboto.woff2": 650, "recurso_n:Roboto.woff2": 1}
+    assert com == {"navegacao": 600, "recurso:Roboto.woff2": 650, "recurso_n:Roboto.woff2": 1}
     medir_abertura.imprimir_comparacao({"com": com, "sem": {"recurso_n:Roboto.woff2": 2}}, {"com": 1, "sem": 1}, "X")
     saida = capsys.readouterr().out
     assert "Arquivo recebido: Roboto.woff2" in saida and "Leituras (vezes) de Roboto.woff2" in saida

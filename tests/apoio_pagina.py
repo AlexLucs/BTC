@@ -23,6 +23,8 @@ ACELERACAO = 50
 REDE_REAL = os.getenv("BTC_REDE_REAL") == "1"
 
 CORS = {"Access-Control-Allow-Origin": "*"}  # a página é aberta por file:// (origem nula)
+# Preço ÷ abertura nos dados simulados: a página calcula 1,23% de variação.
+VARIACAO_SIMULADA = 1.0123
 
 WIDGET_SIMULADO = """
 (function () {
@@ -76,6 +78,14 @@ class RedeSimulada:
         self.falhar_binance = False
         self.segurar_binance = False
         self.sockets: list = []
+        self.urls_ws: list[str] = []
+        # Mensagens de controle que a página enviou (SUBSCRIBE, UNSUBSCRIBE, LIST_SUBSCRIPTIONS).
+        self.controles: list[dict] = []
+        # "resultado": responde como a Binance; "erro": recusa; None: não responde (conexão morta).
+        self.resposta_controle: str | None = "resultado"
+        # Respostas da AwesomeAPI e da mempool.space: o teste pode trocá-las entre consultas.
+        self.dolar = {"USDBRL": {"bid": "5.00", "ask": "5.02"}}
+        self.taxas = {"fastestFee": 3.4, "halfHourFee": 2.1, "hourFee": 1.5, "minimumFee": 1}
         self._segurados: list = []
         self._aleatorio = random.Random(42)
 
@@ -91,24 +101,42 @@ class RedeSimulada:
             return
         contexto.route("https://api.binance.com/**", self._binance)
         contexto.route_web_socket(re.compile(r"^wss://stream\.binance\.com(:\d+)?/"), self._websocket)
-        contexto.route("https://economia.awesomeapi.com.br/**", self._json({"USDBRL": {"bid": "5.00", "ask": "5.02"}}, "dolar"))
-        contexto.route("https://mempool.space/**", self._json({"fastestFee": 3.4, "halfHourFee": 2.1, "hourFee": 1.5, "minimumFee": 1}, "taxas"))
+        contexto.route("https://economia.awesomeapi.com.br/**", self._json("dolar"))
+        contexto.route("https://mempool.space/**", self._json("taxas"))
         contexto.route("https://s3.tradingview.com/**", lambda rota: rota.fulfill(body=WIDGET_SIMULADO, content_type="application/javascript", headers=CORS))
         contexto.route("https://s.tradingview.com/**", lambda rota: rota.fulfill(body="<html><body style='background:#000'></body></html>", content_type="text/html"))
 
     def _websocket(self, ws) -> None:
         self.contagem["ws"] += 1
+        self.urls_ws.append(ws.url)
         self.sockets.append(ws)
+        ws.on_message(lambda texto: self._controle(ws, texto))
+
+    def _controle(self, ws, texto) -> None:
+        mensagem = json.loads(texto)
+        self.controles.append(mensagem)
+        if self.resposta_controle == "resultado":
+            assinados = ["btcbrl@miniTicker"] if mensagem["method"] == "LIST_SUBSCRIPTIONS" else None
+            ws.send(json.dumps({"result": assinados, "id": mensagem["id"]}))
+        elif self.resposta_controle == "erro":
+            ws.send(json.dumps({"code": 2, "msg": "Invalid request"}))
+
+    def metodos(self) -> list[str]:
+        return [mensagem["method"] for mensagem in self.controles]
 
     def fechar_socket(self) -> None:
         """Derruba a conexão mais recente, como se a Binance a tivesse encerrado."""
         self.sockets[-1].close(code=1001, reason="teste")
 
     def enviar_ticker(self, simbolo: str, preco: float, ws=None) -> None:
-        """Envia uma mensagem no formato do stream combinado <par>@ticker da Binance."""
-        dados = {"e": "24hrTicker", "E": int(time.time() * 1000), "s": simbolo, "c": f"{preco:.2f}",
-                 "P": "1.23", "h": f"{preco * 1.01:.2f}", "l": f"{preco * 0.99:.2f}"}
-        (ws or self.sockets[-1]).send(json.dumps({"stream": f"{simbolo.lower()}@ticker", "data": dados}))
+        """Envia uma mensagem no formato do stream combinado <par>@miniTicker da Binance.
+
+        O miniTicker não traz o percentual: a abertura ("o") é tal que a variação dá 1,23%.
+        """
+        dados = {"e": "24hrMiniTicker", "E": int(time.time() * 1000), "s": simbolo, "c": f"{preco:.2f}",
+                 "o": f"{preco / VARIACAO_SIMULADA:.2f}", "h": f"{preco * 1.01:.2f}", "l": f"{preco * 0.99:.2f}",
+                 "v": "100.00000000", "q": "50000000.00000000"}
+        (ws or self.sockets[-1]).send(json.dumps({"stream": f"{simbolo.lower()}@miniTicker", "data": dados}))
 
     def _binance(self, rota) -> None:
         if self.segurar_binance:
@@ -120,16 +148,18 @@ class RedeSimulada:
             return
         self.preco *= 1 + self._aleatorio.uniform(-0.0005, 0.0005)
         tickers = [
-            {"symbol": simbolo, "lastPrice": f"{preco:.2f}", "priceChangePercent": "1.23",
+            {"symbol": simbolo, "lastPrice": f"{preco:.2f}", "priceChangePercent": "1.230",
+             "openPrice": f"{preco / VARIACAO_SIMULADA:.2f}",
              "highPrice": f"{preco * 1.01:.2f}", "lowPrice": f"{preco * 0.99:.2f}"}
             for simbolo, preco in (("BTCBRL", self.preco), ("BTCUSDT", self.preco / 5.01))
         ]
         rota.fulfill(body=json.dumps(tickers), content_type="application/json", headers=CORS)
 
-    def _json(self, dados: dict, nome: str):
+    def _json(self, nome: str):
+        """Responde com o valor atual de self.<nome> (dolar ou taxas)."""
         def responder(rota) -> None:
             self.contagem[nome] += 1
-            rota.fulfill(body=json.dumps(dados), content_type="application/json", headers=CORS)
+            rota.fulfill(body=json.dumps(getattr(self, nome)), content_type="application/json", headers=CORS)
         return responder
 
 
