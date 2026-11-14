@@ -11,7 +11,7 @@ Uso (na raiz do projeto):
     .venv\\Scripts\\python.exe tools\\medir_websocket.py
     .venv\\Scripts\\python.exe tools\\medir_websocket.py --vezes 15
 
-Se a 443 for claramente mais rápida, troque a porta em URL_WS_TICKERS (script.js)
+Se a 443 for claramente mais rápida, troque a porta em URL_WS_BASE (script.js)
 e em connect-src (CSP do index.html).
 """
 
@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from metricas import estatisticas  # noqa: E402
 
-STREAMS = "btcbrl@ticker/btcusdt@ticker"
+STREAMS = "btcbrl@miniTicker/btcusdt@miniTicker"
 PORTAS = (9443, 443)
 
 MEDIR = """async (url) => {

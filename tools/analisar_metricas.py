@@ -32,6 +32,9 @@ ARQUIVO_PADRAO = Path(os.getenv("APPDATA") or Path.home()) / "btcstatus" / NOME_
 # Etapas da abertura: (origem, marco, descrição). O relatório as ordena pelo tempo medido.
 ETAPAS_ABERTURA = [
     ("py", "inicio_script", "Python começa o script (bootloader + interpretador)"),
+    ("py", "net_cedo_inicio", ".NET e imports em paralelo: início"),
+    ("py", "net_cedo_clr", ".NET em paralelo: import clr concluído"),
+    ("py", "net_cedo_imports", "Imports em paralelo (thread auxiliar) concluídos"),
     ("py", "imports_concluidos", "Imports concluídos (inclui pywebview)"),
     ("py", "preco_python_inicio", "Python começa a buscar o 1º preço (thread)"),
     ("py", "log_configurado", "Log configurado"),
@@ -59,6 +62,8 @@ ETAPAS_ABERTURA = [
     ("js", "alertas_sincronizados", "Alertas lidos do disco"),
     ("js", "ws_conectado", "WebSocket da Binance conectado"),
     ("js", "ws_primeiro_preco", "1º preço pelo WebSocket"),
+    ("py", "preco_python_enviado", "1º preço: conexão feita e pedido enviado"),
+    ("py", "preco_python_cabecalhos", "1º preço: servidor começou a responder"),
     ("py", "preco_python_resposta", "1º preço recebido pelo Python"),
     ("py", "preco_python_falha", "1º preço pelo Python falhou"),
     ("py", "servidor_preco_no_html", "Servidor põe o 1º preço no HTML"),

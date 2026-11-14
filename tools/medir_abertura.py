@@ -13,6 +13,9 @@ Uso (na raiz do projeto, com o app fechado):
     .venv\\Scripts\\python.exe tools\\medir_abertura.py --comparar preco-python --vezes 20
     (metade das aberturas sem o recurso, alternadas; no fim, uma tabela compara as duas
      metades. --comparar-preconnect é o mesmo que --comparar preconnect)
+    .venv\\Scripts\\python.exe tools\\medir_abertura.py --comparar-argumentos rede --vezes 20
+    (o mesmo, com e sem OUTROS argumentos do WebView2, além dos adotados pelo app em
+     argumentos_webview2.py: um grupo de lá ou os próprios argumentos entre aspas)
 
 Observações:
 - O app é encerrado à força (sem o evento de fechamento), então a posição da
@@ -39,6 +42,7 @@ sys.path.insert(0, str(RAIZ))
 sys.path.insert(0, str(RAIZ / "tools"))
 
 import analisar_metricas  # noqa: E402
+import argumentos_webview2  # noqa: E402
 from metricas import VARIAVEL_SESSAO  # noqa: E402
 
 
@@ -88,9 +92,21 @@ def main(argumentos: list[str] | None = None) -> int:
                         help="alterna aberturas com e sem o recurso e compara as duas metades")
     parser.add_argument("--comparar-preconnect", action="store_const", dest="comparar", const="preconnect",
                         help="o mesmo que --comparar preconnect")
+    parser.add_argument("--comparar-argumentos", metavar="GRUPO_OU_ARGUMENTOS",
+                        help=f"alterna aberturas com e sem argumentos extras do WebView2 "
+                             f"(grupo: {', '.join(argumentos_webview2.GRUPOS)}; ou os argumentos entre aspas)")
     opcoes = parser.parse_args(argumentos)
+    if opcoes.comparar and opcoes.comparar_argumentos:
+        parser.error("use --comparar ou --comparar-argumentos, um de cada vez")
+    if opcoes.comparar_argumentos:
+        try:
+            extras = argumentos_webview2.resolver(opcoes.comparar_argumentos)
+        except ValueError as erro:
+            parser.error(str(erro))
+        return comparar(opcoes, "Outros argumentos do WebView2", ambiente_dos_argumentos(extras))
     if opcoes.comparar:
-        return comparar(opcoes, opcoes.comparar)
+        variavel, titulo = COMPARACOES[opcoes.comparar]
+        return comparar(opcoes, titulo, lambda sem: {variavel: "1" if sem else "0"})
 
     sessoes: list[str] = []
     for indice in range(1, opcoes.vezes + 1):
@@ -167,9 +183,15 @@ COMPARACOES = {
     "preload-fonte": ("BTC_SEM_AJUSTE_PRELOAD", "Preload da fonte por http"),
     "tipos-fixos": ("BTC_SEM_TIPOS_FIXOS", "Tipos fixos no servidor local"),
     "preco-no-html": ("BTC_SEM_PRECO_NO_HTML", "1º preço dentro do HTML"),
+    "preco-cedo": ("BTC_SEM_PRECO_CEDO", "Busca do 1º preço antes dos imports"),
+    "net-cedo": ("BTC_SEM_NET_CEDO", ".NET em paralelo com os imports"),
+    "argumentos-webview2": ("BTC_SEM_ARGUMENTOS_WEBVIEW2", "Argumentos extras do WebView2 (adotados)"),
 }
 # Etapas da abertura comparadas (nomes de analisar_metricas.ETAPAS_ABERTURA).
-ETAPAS_COMPARADAS = ["preco_python_resposta", "servidor_pedido:script.js", "servidor_fim:script.js",
+ETAPAS_COMPARADAS = ["net_cedo_inicio", "net_cedo_clr", "net_cedo_imports", "imports_concluidos",
+                     "posicao_calculada", "evento_before_show", "evento_shown", "navegacao",
+                     "preco_python_inicio", "preco_python_enviado", "preco_python_cabecalhos",
+                     "preco_python_resposta", "servidor_pedido:index.html", "servidor_fim:index.html", "servidor_pedido:script.js", "servidor_fim:script.js",
                      "recurso:script.js", "recurso:style.css", "dom_pronto", "fontes_prontas",
                      "recurso:Roboto.woff2", "servidor_preco_no_html", "preco_no_html", "nav_load", "preco_inicial_pedido", "preco_inicial_resposta",
                      "precos_continuacao", "api_python_pronta", "primeira_resposta_binance",
@@ -181,12 +203,19 @@ def sem_recurso_na_execucao(indice: int) -> bool:
     return indice % 4 in (2, 3)
 
 
-def comparar(opcoes: argparse.Namespace, recurso: str) -> int:
-    variavel, titulo = COMPARACOES[recurso]
+def ambiente_dos_argumentos(extras: list[str], base: dict[str, str] | None = None):
+    """Função sem -> variáveis da execução: com os argumentos extras, ou como o app roda hoje."""
+    base = os.environ if base is None else base
+    com = argumentos_webview2.valor_da_variavel(extras, base.get(argumentos_webview2.VARIAVEL))
+    return lambda sem: {} if sem else {argumentos_webview2.VARIAVEL: com}
+
+
+def comparar(opcoes: argparse.Namespace, titulo: str, ambiente_da_execucao) -> int:
+    """ambiente_da_execucao(sem) devolve as variáveis de ambiente de uma execução sem/com o recurso."""
     grupos: dict[str, list[str]] = {"com": [], "sem": []}
     for indice in range(1, opcoes.vezes + 1):
         sem = sem_recurso_na_execucao(indice)
-        extra = {variavel: "1" if sem else "0"}
+        extra = ambiente_da_execucao(sem)
         rotulo = f" [{'sem' if sem else 'com'}: {titulo.lower()}]"
         sessao = abrir_e_medir(opcoes, indice, extra, rotulo=rotulo)
         if sessao:
