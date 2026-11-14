@@ -137,6 +137,36 @@ input {
     opacity: 0.5;
 }
 
+/* Valor do alerta: botão com aparência de texto; o clique abre a edição na linha
+   (script.js: iniciarEdicaoValor). Ser um <button> o tira do arraste da janela. */
+.botaoValor {
+    width: 100%;
+    padding: 0 6px;
+    background: none;
+    border: none;
+    font: inherit;
+    color: inherit;
+    cursor: text;
+    white-space: nowrap;
+    transition: var(--transicao);
+}
+
+.botaoValor:hover,
+.botaoValor:focus-visible {
+    color: var(--laranja);
+}
+
+/* Campo da edição: ocupa a largura da coluna do valor sem alargá-la
+   (largura em % não conta na largura mínima da coluna). */
+#alertasTabela input.campoEdicaoValor {
+    width: 100%;
+    height: 40px;
+    margin: 0;
+    padding: 0 6px;
+    font-size: inherit;
+    font-weight: normal;
+}
+
 /* Controles da janela no topo (ocultos até o script decidir quais exibir) */
 .btns {
     position: absolute;
@@ -363,10 +393,24 @@ input[type="number"]::-webkit-inner-spin-button {
     opacity: 0.55;
 }
 
-/* Largura fixa: trocar ↔/↑/↓ (larguras diferentes) ou apagar a seta ("Sem Dados") não
-   desloca o percentual, que é centralizado junto com ela. */
+/* Só o percentual é centralizado: a grade tem duas colunas laterais de mesma largura,
+   e a seta fica na da direita, colada ao número. Trocar ↔/↑/↓ ou apagar a seta
+   ("Sem Dados") não desloca o percentual. Numa grade, o espaço do HTML entre os dois
+   <span> é descartado: a distância vem do margin-left (um espaço da Roboto). */
+.percentual {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    align-items: baseline;
+}
+
+#info-percent {
+    grid-column: 2;
+}
+
 #info-seta {
-    display: inline-block;
+    grid-column: 3;
+    justify-self: start;
+    margin-left: 0.25em;
     width: 1em;
     text-align: center;
     font-weight: bold;

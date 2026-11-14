@@ -16,9 +16,15 @@ const isPyWebView = navigator.userAgent.includes('pywebview');
 const SIMBOLO_BRL = 'BTCBRL';
 const SIMBOLO_USDT = 'BTCUSDT';
 const URL_TICKERS = `https://api.binance.com/api/v3/ticker/24hr?symbols=${encodeURIComponent(JSON.stringify([SIMBOLO_BRL, SIMBOLO_USDT]))}`;
-// WebSocket da Binance (stream combinado <par>@ticker): preço a cada ~1 s, sem requisições.
+// WebSocket da Binance (stream combinado <par>@miniTicker): preço a cada ~1 s, sem requisições.
+// O miniTicker traz só o que a tela usa (fechamento, abertura, máxima e mínima de 24 h), em
+// menos da metade dos bytes do <par>@ticker; a variação percentual é calculada aqui, pela
+// abertura (variacaoPercentual, em regras.js).
 // O REST acima busca o 1º preço na abertura e serve de reserva quando o WebSocket cai.
-const URL_WS_TICKERS = `wss://stream.binance.com:9443/stream?streams=${[SIMBOLO_BRL, SIMBOLO_USDT].map(par => `${par.toLowerCase()}@ticker`).join('/')}`;
+// O BTC/USDT só é assinado com a página visível (ver ajustarAssinaturas).
+const STREAM_BRL = `${SIMBOLO_BRL.toLowerCase()}@miniTicker`;
+const STREAM_USDT = `${SIMBOLO_USDT.toLowerCase()}@miniTicker`;
+const URL_WS_BASE = 'wss://stream.binance.com:9443/stream?streams=';
 const URL_USD_BRL = 'https://economia.awesomeapi.com.br/json/last/USD-BRL';
 const URL_TAXAS = 'https://mempool.space/api/v1/fees/precise';
 
@@ -33,14 +39,25 @@ const CAMPOS_TAXA = ['fastestFee', 'halfHourFee', 'hourFee', 'minimumFee'];
 // ---------------------------------------------------------------------------
 const PRECO_INTERVALO_MIN = 3000;
 const PRECO_INTERVALO_VARIACAO = 3000;
-const TAXAS_INTERVALO_MIN = 50000;
-const TAXAS_INTERVALO_VARIACAO = 20000;
-// A AwesomeAPI sem chave mantém cache de 1 min e tem cota mensal: consultar mais
-// que isso só gasta cota.
+// Taxas: o intervalo acompanha a atividade recente (intervaloPorAtividade, em regras.js).
+// Vai de 1 min, quando as últimas TAXAS_JANELA consultas mudaram, a 5 min, quando nenhuma
+// mudou. "Mudar" é alguma taxa se afastar TAXAS_LIMIAR_VARIACAO (5%) do valor da última mudança.
+const TAXAS_INTERVALO_MIN = 60000;
+const TAXAS_INTERVALO_MAX = 300000;
+const TAXAS_INTERVALO_VARIACAO = 10000;
+const TAXAS_JANELA = 4;
+const TAXAS_LIMIAR_VARIACAO = 0.05;
+// Dólar comercial: a AwesomeAPI sem chave mantém cache de 1 min e tem cota mensal, então
+// nunca menos que 60 s. Fora do pregão a cotação não muda: depois de DOLAR_TOLERANCIA
+// consultas iguais, o intervalo dobra a cada consulta, até 10 min; a 1ª mudança volta aos
+// 60 s (intervaloComRecuo, em regras.js).
 const DOLAR_INTERVALO_MIN = 60000;
+const DOLAR_INTERVALO_MAX = 600000;
 const DOLAR_INTERVALO_VARIACAO = 10000;
+const DOLAR_TOLERANCIA = 3;
 
 const WS_LIMITE_SILENCIO = 10000;  // nenhuma mensagem (BRL ou USDT) por 10 s: conexão considerada perdida
+const WS_ESPERA_SONDA = 5000;      // só com BTC/BRL assinado: silêncio que leva a perguntar se a conexão vive
 const WS_RECONEXAO_MIN = 1000;     // espera da 1ª reconexão; dobra a cada tentativa
 const WS_RECONEXAO_MAX = 60000;
 const TIMEOUT_REQUISICAO = 8000;
@@ -114,9 +131,23 @@ let taxasNaTela = false;
 // deles responder (ou até virarem "Sem Dados"). Ver marcarSalvo/marcarAtualizado.
 const gruposSalvos = new Set();
 
+// Cadeias que ligam e desligam conforme a necessidade (ver ajustarFontes).
+let precosLigados = false;        // REST + WebSocket de preços
+const fontes = {
+	taxas: { ligada: false, geracao: 0 },
+	dolar: { ligada: false, geracao: 0 },
+};
+// Ritmo das consultas (regras.js): o dólar recua quando a cotação para; as taxas seguem a atividade.
+let ritmoDolar = { intervalo: DOLAR_INTERVALO_MIN, semMudanca: 0 };
+let cotacaoDolarConsultada = NaN; // última cotação recebida (para saber se mudou)
+let historicoTaxas = [];          // por consulta: true se as taxas mudaram além do limiar
+let referenciaTaxas = null;       // taxas da última mudança (ou da 1ª leitura)
+
 let ws = null;                    // conexão atual com o stream da Binance
 let wsSaudavel = false;           // recebendo BTC/BRL pelo WebSocket: o polling REST fica parado
 let wsTentativas = 0;             // reconexões seguidas sem receber preço (define a espera)
+let wsComUsdt = false;            // a conexão atual assina o BTC/USDT (false: só o BTC/BRL)
+let wsIdControle = 0;             // id da última mensagem de controle enviada (SUBSCRIBE etc.)
 let cadeiaRestAtiva = false;      // há uma consulta REST de preço agendada ou em andamento
 let ultimaMensagemBRL = 0;        // performance.now() da última mensagem de BTC/BRL pelo WebSocket
 
@@ -126,6 +157,7 @@ let alertaAberto = false;
 let audioAlerta = null;
 
 let graficoVisivel = false;       // escolha do usuário pelo botão ⇄ (padrão: atributo "hidden" de #grafico no HTML)
+let graficoLiberado = false;      // a abertura já passou do ponto em que o gráfico pode ser montado (aposCarregarPagina)
 let compacto = false;             // modo compacto: classe "compacto" no <html> (no app, vem do servidor local na abertura)
 let filaCompacto = Promise.resolve(); // pedidos de redimensionamento ao Python, na ordem dos cliques
 let fixado = false;
@@ -138,7 +170,7 @@ let alarmeSemAtividade = false;
 let wakeLock = null;
 let pedindoWakeLock = false;
 
-const timers = { preco: 0, taxas: 0, dolar: 0, alarmes: 0, silencio: 0, wsVigia: 0, wsReconexao: 0 };
+const timers = { preco: 0, taxas: 0, dolar: 0, alarmes: 0, silencio: 0, wsVigia: 0, wsSonda: 0, wsReconexao: 0 };
 
 const el = id => document.getElementById(id);
 
@@ -219,20 +251,34 @@ function paraNumero(valor, campo) {
 	return numero;
 }
 
+/**
+ * Variação percentual de 24 h pela abertura, a mesma conta no REST e no WebSocket (o
+ * miniTicker não traz o percentual pronto). Sem abertura válida, vale o percentual que
+ * a Binance mandou, se houver.
+ */
+function lerVariacao(preco, abertura, campoAbertura, percentualPronto) {
+	const calculada = variacaoPercentual(preco, parseFloat(abertura));
+	if (Number.isFinite(calculada)) return calculada;
+	if (percentualPronto !== undefined) return paraNumero(percentualPronto, 'priceChangePercent');
+	throw new Error(`Campo "${campoAbertura}" inválido: ${abertura}`);
+}
+
 function lerTicker(dados) {
+	const preco = paraNumero(dados.lastPrice, 'lastPrice');
 	return {
-		preco: paraNumero(dados.lastPrice, 'lastPrice'),
-		variacao: paraNumero(dados.priceChangePercent, 'priceChangePercent'),
+		preco,
+		variacao: lerVariacao(preco, dados.openPrice, 'openPrice', dados.priceChangePercent),
 		maxima: paraNumero(dados.highPrice, 'highPrice'),
 		minima: paraNumero(dados.lowPrice, 'lowPrice'),
 	};
 }
 
-/** Lê o ticker de uma mensagem do WebSocket (campos c, P, h, l da Binance). */
+/** Lê o ticker de uma mensagem do WebSocket (campos c, o, h, l do miniTicker da Binance). */
 function lerTickerWs(dados) {
+	const preco = paraNumero(dados.c, 'c');
 	return {
-		preco: paraNumero(dados.c, 'c'),
-		variacao: paraNumero(dados.P, 'P'),
+		preco,
+		variacao: lerVariacao(preco, dados.o, 'o', dados.P),
 		maxima: paraNumero(dados.h, 'h'),
 		minima: paraNumero(dados.l, 'l'),
 	};
@@ -258,8 +304,14 @@ function extrairTicker(porSimbolo, simbolo, erroRede) {
 // agendada quando a atual termina, então requisições nunca se sobrepõem)
 // ---------------------------------------------------------------------------
 
+/** A cadeia de preços (REST e WebSocket) desta geração ainda é a que vale. */
 function cicloAtual(geracao) {
 	return ativo && geracao === geracaoCiclo;
+}
+
+/** O mesmo para as cadeias do dólar comercial e das taxas, que ligam e desligam à parte. */
+function fonteAtual(nome, geracao) {
+	return ativo && fontes[nome].ligada && geracao === fontes[nome].geracao;
 }
 
 function agendar(nome, funcao, minimo, variacao, geracao) {
@@ -275,28 +327,115 @@ function agendar(nome, funcao, minimo, variacao, geracao) {
 
 function iniciarCiclos() {
 	ativo = true;
-	const geracao = ++geracaoCiclo;
 	controleCiclo = new AbortController();
 	adquirirWakeLock();
-	cadeiaRestAtiva = true;
-	atualizarPrecos(geracao); // REST: 1º preço rápido
-	conectarWebSocket(geracao);
-	atualizarTaxas(geracao);
-	atualizarDolar(geracao);
+	ajustarFontes();
 }
 
 function pararCiclos() {
 	ativo = false;
-	geracaoCiclo++;
 	controleCiclo.abort();
+	desligarPrecos();
+	desligarFonte('taxas');
+	desligarFonte('dolar');
+	liberarWakeLock();
+}
+
+// ---------------------------------------------------------------------------
+// Fontes ligadas só quando são necessárias (banda)
+//
+// fontesNecessarias (regras.js) diz o que buscar: preços com a página visível ou, oculta,
+// com algum alerta ativo; dólar comercial só com ela visível; taxas só visível e fora do
+// modo compacto; o gráfico idem (ver atualizarGrafico). ajustarFontes liga e desliga cada
+// cadeia quando algo disso muda: visibilidade, modo compacto, alertas, pausa. Com a página
+// oculta e um alerta ativo, o WebSocket assina só o BTC/BRL (ver ajustarAssinaturas).
+//
+// Uma fonte religada mostra o último valor esmaecido até responder, como o estado salvo.
+// Preços desligados nunca entram nos alarmes: ultimoPrecoBRL vira NaN.
+// ---------------------------------------------------------------------------
+
+/**
+ * A página conta como visível? No navegador, sempre: a aba em segundo plano mostra o preço
+ * no título. No app (o título da janela é fixo), vale a visibilidade real, mas só depois do
+ * 1º preço: a abertura nunca espera por ela.
+ */
+function paginaVisivel() {
+	if (!isPyWebView || !carregado) return true;
+	return document.visibilityState === 'visible';
+}
+
+function necessidades() {
+	return fontesNecessarias({ ativo, visivel: paginaVisivel(), compacto, alertaAtivo: existeAlertaAtivo(alertas) });
+}
+
+function ajustarFontes() {
+	const precisa = necessidades();
+	if (precisa.precos !== precosLigados) {
+		if (precisa.precos) ligarPrecos();
+		else desligarPrecos();
+	}
+	for (const nome of ['taxas', 'dolar']) {
+		if (precisa[nome] === fontes[nome].ligada) continue;
+		if (precisa[nome]) ligarFonte(nome);
+		else desligarFonte(nome);
+	}
+	ajustarAssinaturas();
+	atualizarGrafico();
+}
+
+function ligarPrecos() {
+	precosLigados = true;
+	Metricas.contar('fonte:ligada:precos');
+	const geracao = ++geracaoCiclo;
+	// Valores que ficaram na tela enquanto a fonte esteve desligada: esmaecidos até o novo chegar.
+	if (Number.isFinite(precoBRLExibido)) {
+		exibindoEstadoSalvo = true;
+		marcarSalvo('brl');
+	}
+	if (Number.isFinite(precoUSDExibido)) marcarSalvo('usdt');
+	if (Number.isFinite(precoBRLExibido / precoUSDExibido)) marcarSalvo('dolarImplicito');
+	cadeiaRestAtiva = true;
+	atualizarPrecos(geracao); // REST: 1º preço rápido
+	conectarWebSocket(geracao);
+}
+
+function desligarPrecos() {
+	if (precosLigados) Metricas.contar('fonte:desligada:precos');
+	precosLigados = false;
+	geracaoCiclo++;
 	fecharWebSocket();
 	wsTentativas = 0;
 	cadeiaRestAtiva = false;
-	for (const nome of ['preco', 'taxas', 'dolar', 'alarmes', 'wsReconexao']) {
+	// Só exibição daqui em diante: um preço parado não pode disparar alarme.
+	ultimoPrecoBRL = NaN;
+	ultimoPrecoUSD = NaN;
+	for (const nome of ['preco', 'alarmes', 'wsReconexao']) {
 		clearTimeout(timers[nome]);
 		timers[nome] = 0;
 	}
-	liberarWakeLock();
+}
+
+function ligarFonte(nome) {
+	const fonte = fontes[nome];
+	fonte.ligada = true;
+	Metricas.contar(`fonte:ligada:${nome}`);
+	const geracao = ++fonte.geracao;
+	if (nome === 'taxas') {
+		if (taxasNaTela) marcarSalvo('taxas');
+		atualizarTaxas(geracao);
+	} else {
+		if (Number.isFinite(ultimaCotacaoDolar)) marcarSalvo('dolarComercial');
+		atualizarDolar(geracao);
+	}
+}
+
+function desligarFonte(nome) {
+	const fonte = fontes[nome];
+	if (fonte.ligada) Metricas.contar(`fonte:desligada:${nome}`);
+	fonte.ligada = false;
+	fonte.geracao++; // a resposta em andamento é descartada
+	clearTimeout(timers[nome]);
+	timers[nome] = 0;
 }
 
 // No app, o Python pede o 1º preço logo ao abrir, antes de a página existir
@@ -462,27 +601,99 @@ function agendarChecagemAlarmes(geracao) {
 // WS_LIMITE_SILENCIO sem nenhuma mensagem (BRL ou USDT), o REST volta na hora e o app
 // tenta reconectar com espera crescente (1 s, 2 s, 4 s... até 60 s, com variação
 // aleatória). Pausar fecha a conexão; retomar abre de novo.
+//
+// O BTC/USDT só é exibido, nunca dispara alarme: com a página oculta (e um alerta ativo
+// mantendo os preços ligados), a conexão fica só com o BTC/BRL. A troca é feita na conexão
+// aberta, com SUBSCRIBE/UNSUBSCRIBE; uma conexão nova já nasce com a URL certa.
+// Sem o BTC/USDT (1 mensagem por segundo), o silêncio deixa de indicar queda: o BTC/BRL
+// passa de 5 a 16 s calado. Aí, a cada WS_ESPERA_SONDA sem mensagem, o app envia
+// LIST_SUBSCRIPTIONS; a resposta conta como sinal de vida, e a falta dela cai na vigia.
 // ---------------------------------------------------------------------------
+
+function urlDoWebSocket(comUsdt) {
+	return URL_WS_BASE + (comUsdt ? [STREAM_BRL, STREAM_USDT] : [STREAM_BRL]).join('/');
+}
+
+function enviarControle(metodo, parametros) {
+	const mensagem = { method: metodo, id: ++wsIdControle };
+	if (parametros) mensagem.params = parametros;
+	ws.send(JSON.stringify(mensagem));
+	Metricas.contar(`ws:controle:${metodo}`);
+}
+
+/** Assina ou cancela o BTC/USDT na conexão aberta, conforme a página esteja visível. */
+function ajustarAssinaturas() {
+	if (!ws || ws.readyState !== WebSocket.OPEN) return; // ao abrir, a URL já veio certa
+	const comUsdt = necessidades().usdt;
+	if (comUsdt === wsComUsdt) return;
+	wsComUsdt = comUsdt;
+	enviarControle(comUsdt ? 'SUBSCRIBE' : 'UNSUBSCRIBE', [STREAM_USDT]);
+	if (comUsdt) {
+		clearTimeout(timers.wsSonda);
+		timers.wsSonda = 0;
+		// O dólar da tela é de quando a página foi ocultada: esmaecido até o BTC/USDT chegar.
+		if (Number.isFinite(precoUSDExibido)) marcarSalvo('usdt');
+		if (Number.isFinite(precoBRLExibido / precoUSDExibido)) marcarSalvo('dolarImplicito');
+	} else {
+		rearmarSonda();
+	}
+}
+
+/**
+ * Só com o BTC/BRL assinado: agenda a pergunta "a conexão vive?". É sempre chamada a partir
+ * de uma mensagem recebida (ou da troca de assinatura), nunca do próprio timer: timers
+ * encadeados são atrasados para 1 por minuto com a página oculta.
+ */
+function rearmarSonda() {
+	clearTimeout(timers.wsSonda);
+	timers.wsSonda = 0;
+	if (wsComUsdt) return;
+	const socket = ws;
+	timers.wsSonda = setTimeout(() => {
+		timers.wsSonda = 0;
+		if (ws === socket && socket.readyState === WebSocket.OPEN && !wsComUsdt) enviarControle('LIST_SUBSCRIPTIONS');
+	}, WS_ESPERA_SONDA);
+}
+
+/**
+ * Resposta a uma mensagem de controle: {"result": ..., "id": N}, ou um erro da Binance
+ * ({"code": N, "msg": "..."}, com ou sem "error" em volta). O erro derruba a conexão: a
+ * nova nasce com as assinaturas certas.
+ */
+function aoReceberControleWs(mensagem, geracao) {
+	if (mensagem.error || 'code' in mensagem) {
+		console.warn('O WebSocket da Binance recusou uma mensagem de controle:', mensagem);
+		perderWebSocket(geracao, 'controle');
+		return;
+	}
+	Metricas.contar('ws:controle:respostas');
+	rearmarVigia(geracao);
+	rearmarSonda();
+}
 
 function conectarWebSocket(geracao) {
 	if (!cicloAtual(geracao) || typeof WebSocket !== 'function') return;
 	fecharWebSocket();
 	Metricas.contar('ws:conexoes');
+	const comUsdt = necessidades().usdt;
 	let socket;
 	try {
-		socket = new WebSocket(URL_WS_TICKERS);
+		socket = new WebSocket(urlDoWebSocket(comUsdt));
 	} catch (erro) {
 		console.warn('Não foi possível abrir o WebSocket da Binance:', erro);
 		agendarReconexao(geracao);
 		return;
 	}
 	ws = socket;
+	wsComUsdt = comUsdt;
 	const inicio = performance.now();
 	socket.addEventListener('open', () => {
 		if (ws !== socket) return;
 		Metricas.registrar('ws:conexao', performance.now() - inicio);
 		Metricas.marcar('ws_conectado');
 		rearmarVigia(geracao); // aberto mas mudo também conta como perdido
+		rearmarSonda();
+		ajustarAssinaturas();  // a visibilidade pode ter mudado enquanto a conexão abria
 	});
 	socket.addEventListener('message', evento => {
 		if (ws === socket && cicloAtual(geracao)) aoReceberMensagemWs(evento.data, geracao);
@@ -497,8 +708,10 @@ function fecharWebSocket() {
 	const socket = ws;
 	ws = null;
 	wsSaudavel = false;
-	clearTimeout(timers.wsVigia);
-	timers.wsVigia = 0;
+	for (const nome of ['wsVigia', 'wsSonda']) {
+		clearTimeout(timers[nome]);
+		timers[nome] = 0;
+	}
 	if (socket && socket.readyState <= WebSocket.OPEN) socket.close();
 }
 
@@ -535,7 +748,12 @@ function aoReceberMensagemWs(texto, geracao) {
 	let dados;
 	let ticker;
 	try {
-		dados = JSON.parse(texto).data;
+		const mensagem = JSON.parse(texto);
+		if (mensagem && mensagem.data === undefined && ('id' in mensagem || 'code' in mensagem || 'error' in mensagem)) {
+			aoReceberControleWs(mensagem, geracao);
+			return;
+		}
+		dados = mensagem.data;
 		ticker = lerTickerWs(dados);
 	} catch (erro) {
 		Metricas.contar('ws:mensagem_invalida');
@@ -551,6 +769,7 @@ function aoReceberMensagemWs(texto, geracao) {
 	// envia o ticker quando algo muda (silêncios de 5 a 16 s são normais). O BTC/USDT
 	// chega a cada ~1 s; se os dois calarem por WS_LIMITE_SILENCIO, a conexão caiu.
 	rearmarVigia(geracao);
+	rearmarSonda();
 	wsTentativas = 0;
 
 	if (dados.s === SIMBOLO_BRL) {
@@ -586,8 +805,9 @@ async function atualizarDolar(geracao) {
 	} catch (erro) {
 		falha = erro;
 	}
-	if (!cicloAtual(geracao)) return;
+	if (!fonteAtual('dolar', geracao)) return;
 	Metricas.registrar('ciclo:dolar', performance.now() - inicio);
+	let espera = DOLAR_INTERVALO_MIN; // depois de uma falha, tenta de novo no intervalo mínimo
 	if (falha) {
 		console.error('Erro ao buscar USD/BRL na AwesomeAPI:', falha);
 		Metricas.contar('falha:dolar');
@@ -602,9 +822,15 @@ async function atualizarDolar(geracao) {
 		ultimaCotacaoDolar = cotacao;
 		marcarAtualizado('dolarComercial');
 		atualizarEstado({ dolar: cotacao });
+		// Cotação parada (fora do pregão): consulta cada vez menos, até mudar de novo.
+		ritmoDolar = intervaloComRecuo(ritmoDolar, cotacao !== cotacaoDolarConsultada,
+			{ minimo: DOLAR_INTERVALO_MIN, maximo: DOLAR_INTERVALO_MAX, tolerancia: DOLAR_TOLERANCIA });
+		cotacaoDolarConsultada = cotacao;
+		espera = ritmoDolar.intervalo;
 	}
 	exibirDolar();
-	agendar('dolar', atualizarDolar, DOLAR_INTERVALO_MIN, DOLAR_INTERVALO_VARIACAO, geracao);
+	Metricas.registrar('intervalo:dolar', espera);
+	agendar('dolar', atualizarDolar, espera, DOLAR_INTERVALO_VARIACAO, geracao);
 }
 
 async function atualizarTaxas(geracao) {
@@ -618,8 +844,9 @@ async function atualizarTaxas(geracao) {
 	} catch (erro) {
 		falha = erro;
 	}
-	if (!cicloAtual(geracao)) return;
+	if (!fonteAtual('taxas', geracao)) return;
 	Metricas.registrar('ciclo:taxas', performance.now() - inicio);
+	let espera = TAXAS_INTERVALO_MIN; // depois de uma falha, tenta de novo no intervalo mínimo
 	if (falha) {
 		console.error('Erro ao buscar taxas na mempool.space:', falha);
 		Metricas.contar('falha:taxas');
@@ -631,8 +858,15 @@ async function atualizarTaxas(geracao) {
 		const taxas = Object.fromEntries(CAMPOS_TAXA.map((campo, indice) => [campo, valores[indice]]));
 		exibirTaxas(taxas);
 		atualizarEstado({ taxas });
+		// Mais mudanças recentes, consultas mais próximas (1 min); taxas paradas, até 5 min.
+		const mudou = variouAlemDoLimiar(referenciaTaxas, valores, TAXAS_LIMIAR_VARIACAO);
+		if (mudou) referenciaTaxas = valores;
+		historicoTaxas = [...historicoTaxas, mudou].slice(-TAXAS_JANELA);
+		espera = intervaloPorAtividade(historicoTaxas,
+			{ minimo: TAXAS_INTERVALO_MIN, maximo: TAXAS_INTERVALO_MAX, janela: TAXAS_JANELA });
 	}
-	agendar('taxas', atualizarTaxas, TAXAS_INTERVALO_MIN, TAXAS_INTERVALO_VARIACAO, geracao);
+	Metricas.registrar('intervalo:taxas', espera);
+	agendar('taxas', atualizarTaxas, espera, TAXAS_INTERVALO_VARIACAO, geracao);
 }
 
 // ---------------------------------------------------------------------------
@@ -817,6 +1051,7 @@ function gravarEstado(forcar) {
 function concluirCarregamento() {
 	if (carregado) return;
 	carregado = true;
+	ajustarFontes(); // daqui em diante a visibilidade da janela conta (ver paginaVisivel)
 	mostrarConteudo();
 	silenciarAlarmes(SILENCIO_APOS_CARREGAR); // evita disparo imediato ao abrir
 	Metricas.marcar('primeiro_preco');
@@ -871,7 +1106,9 @@ function enviarRelatorioAbertura(forcar = false) {
  * novo o <template>, e o script do TradingView recria o gráfico.
  */
 function atualizarGrafico() {
-	const mostrar = graficoVisivel && ativo && !compacto;
+	// Com a janela do app oculta o gráfico também sai (ele tem a própria rede); volta ao reaparecer.
+	// Na abertura só entra depois do "load" e da ponte do Python (graficoLiberado).
+	const mostrar = graficoLiberado && graficoVisivel && necessidades().grafico;
 	ui.grafico.style.display = mostrar ? 'flex' : 'none';
 	ui.grafico.hidden = !mostrar; // mantém o atributo do HTML coerente com o que está na tela
 	if (!mostrar) {
@@ -986,7 +1223,7 @@ function gravarCompactoLocal(ativo) {
 function aplicarCompacto() {
 	document.documentElement.classList.toggle('compacto', compacto);
 	atualizarBotaoCompacto();
-	atualizarGrafico();
+	ajustarFontes(); // as taxas só são buscadas fora do modo compacto; o gráfico idem
 }
 
 function atualizarBotaoCompacto() {
@@ -1314,6 +1551,7 @@ function gravarAlertas(lista) {
 	alertas = ordenarAlertas(lista);
 	if (isPyWebView) persistirEmDisco(alertas);
 	else gravarLocal(alertas);
+	ajustarFontes(); // com a janela oculta, é o alerta ativo que mantém os preços ligados
 }
 
 /** No app, o arquivo em disco é a fonte da verdade. */
@@ -1331,6 +1569,7 @@ async function sincronizarAlertas() {
 		}
 		const { alertas: lista, alterado } = normalizarLista(doDisco);
 		alertas = lista;
+		ajustarFontes();
 		Metricas.marcar('alertas_sincronizados');
 		if (alterado) persistirEmDisco(alertas); // migração de formato antigo
 		if (modalAlertaAberto()) renderizarTabelaAlertas();
@@ -1420,11 +1659,20 @@ function apagarAlerta(id) {
 	renderizarTabelaAlertas();
 }
 
+/**
+ * Preço usado para escolher o lado de um alerta reativado: o dos alarmes (novo e sem
+ * falha do BTC/BRL); sem ele, o que está na tela (estado salvo); sem nenhum, NaN ("maior").
+ */
+function precoParaReativar() {
+	const precoDosAlarmes = falhasBRL === 0 ? ultimoPrecoBRL : NaN;
+	return Number.isFinite(precoDosAlarmes) ? precoDosAlarmes : precoBRLExibido;
+}
+
 function alternarTipoAlerta(id) {
 	const alvo = alertas.find(a => a.id === id);
 	if (!alvo) return;
 
-	const novoTipo = PROXIMO_TIPO[alvo.tipo];
+	const novoTipo = proximoTipo(alvo, precoParaReativar());
 	if (existeDuplicado(alertas, alvo.valor, novoTipo, id)) {
 		aviso('FALHA', 'Existe um alerta com esse mesmo valor.', 5000);
 		return;
@@ -1471,8 +1719,16 @@ function montarTabelaAlertas() {
 		botaoTipo.classList.toggle('desativado', alerta.tipo === TIPO.DESATIVADO);
 		const botaoApagar = criarBotao('botaoApagar', 'apagar', 'Apagar', `Apagar alarme ${valorFormatado}`);
 
-		const celulaValor = criarCelula(valorFormatado);
-		celulaValor.title = valorFormatado;
+		// O valor é um botão: clicar (ou Enter pelo teclado) abre a edição na própria linha.
+		const botaoValor = document.createElement('button');
+		botaoValor.type = 'button';
+		botaoValor.className = 'botaoValor';
+		botaoValor.dataset.acao = 'editar';
+		botaoValor.textContent = valorFormatado;
+		botaoValor.title = alerta.tipo === TIPO.DESATIVADO
+			? `Editar ${valorFormatado} (o alerta volta a valer pelo lado que não dispara agora)`
+			: `Editar ${valorFormatado}`;
+		const celulaValor = criarCelula(botaoValor);
 
 		const linha = document.createElement('tr');
 		linha.dataset.id = alerta.id;
@@ -1493,6 +1749,67 @@ function aoClicarTabela(evento) {
 	if (!id) return;
 	if (botao.dataset.acao === 'tipo') alternarTipoAlerta(id);
 	else if (botao.dataset.acao === 'apagar') apagarAlerta(id);
+	else if (botao.dataset.acao === 'editar') iniciarEdicaoValor(botao, id);
+}
+
+const MENSAGEM_EDICAO = {
+	invalido: 'Digite um número válido maior que zero.',
+	duplicado: 'Existe um alerta com esse mesmo valor.',
+};
+
+/**
+ * Troca o valor da linha por um campo. Enter confirma; Esc ou sair do campo cancela
+ * (o botão volta como estava). Redesenhar a tabela no meio da edição também a descarta.
+ */
+function iniciarEdicaoValor(botao, id) {
+	const alvo = alertas.find(a => a.id === id);
+	if (!alvo) return;
+
+	const campo = document.createElement('input');
+	campo.type = 'number';
+	campo.min = '0.01';
+	campo.step = '0.01';
+	campo.className = 'campoEdicaoValor';
+	campo.value = String(alvo.valor);
+	campo.title = 'Enter confirma; Esc ou clicar fora cancela.';
+	campo.setAttribute('aria-label', 'Novo valor do alerta');
+
+	let encerrada = false;
+	const cancelar = (devolverFoco) => {
+		if (encerrada) return;
+		encerrada = true;
+		if (!campo.isConnected) return; // a tabela já foi redesenhada
+		campo.replaceWith(botao);
+		if (devolverFoco) botao.focus();
+	};
+
+	campo.addEventListener('keydown', evento => {
+		if (evento.key === 'Enter') {
+			evento.preventDefault();
+			if (encerrada) return;
+			encerrada = true; // antes de confirmar: o aviso de erro tira o foco do campo
+			confirmarEdicaoValor(id, campo.value);
+		} else if (evento.key === 'Escape') {
+			evento.preventDefault();
+			cancelar(true);
+		}
+	});
+	campo.addEventListener('blur', () => cancelar(false));
+
+	botao.replaceWith(campo);
+	campo.focus();
+	campo.select();
+}
+
+function confirmarEdicaoValor(id, entrada) {
+	const resultado = editarValorAlerta(alertas, id, entrada, precoParaReativar());
+	if (resultado.lista) {
+		gravarAlertas(resultado.lista);
+		silenciarAlarmes();
+	} else if (MENSAGEM_EDICAO[resultado.erro]) {
+		aviso('FALHA', MENSAGEM_EDICAO[resultado.erro], 15000);
+	}
+	renderizarTabelaAlertas();
 }
 
 function aoTeclarValorAlerta(evento) {
@@ -1514,7 +1831,10 @@ function aposCarregarPagina() {
 	audioAlerta.preload = 'auto';
 	// No app, o gráfico espera também a ponte do Python: o script do TradingView
 	// (tarefa longa de ~60 ms) atrasaria a injeção do pywebview, que vem logo após o "load".
-	const montar = () => quandoOcioso(atualizarGrafico, ESPERA_OCIOSA_GRAFICO);
+	const montar = () => quandoOcioso(() => {
+		graficoLiberado = true;
+		atualizarGrafico();
+	}, ESPERA_OCIOSA_GRAFICO);
 	if (isPyWebView) obterApi().catch(() => {}).finally(montar);
 	else montar();
 	enviarRelatorioAbertura(); // no navegador, a abertura termina no "load" (ver aberturaConcluida)
@@ -1564,6 +1884,7 @@ function registrarEventos() {
 	document.addEventListener('visibilitychange', () => {
 		if (document.visibilityState === 'hidden') gravarEstado(true);
 		else if (ativo) adquirirWakeLock();
+		ajustarFontes(); // janela oculta: sem rede, ou só os preços se houver alerta ativo
 	});
 	window.addEventListener('pagehide', () => gravarEstado(true));
 	if (typeof ResizeObserver === 'function') new ResizeObserver(aoRedimensionar).observe(el('conteudoMenosBotoes'));

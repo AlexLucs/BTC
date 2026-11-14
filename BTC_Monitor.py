@@ -12,20 +12,112 @@ import time
 _INICIO_PERF = time.perf_counter()
 _INICIO_EPOCH = time.time()
 
-import configparser  # noqa: E402 - os imports vêm depois do marco inicial de propósito
+import os  # noqa: E402 - os imports vêm depois do marco inicial de propósito
+import sys  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# 1º preço: a requisição sai AQUI, antes dos imports pesados (logging, pywebview...).
+#
+# Ela leva ~350-500 ms e a página fica pronta para usá-la ~600 ms depois da criação do
+# processo: cada ms ganho no início vale para o preço chegar a tempo de ir dentro do HTML.
+# Por isso o primeiro_preco é leve (só threading e time no topo) e nada pesado pode ser
+# importado antes deste bloco. Só ao executar o app: importar este módulo (testes) não
+# faz nenhuma requisição.
+# ---------------------------------------------------------------------------
+from primeiro_preco import BuscaPrimeiroPreco  # noqa: E402
+
+# Só na medição (tools/medir_abertura.py --comparar): preco-python não busca o preço pelo
+# Python (a página fica só com o REST); preco-cedo o busca só no main(), depois dos imports.
+VARIAVEL_SEM_PRECO_PYTHON = "BTC_SEM_PRECO_PYTHON"
+VARIAVEL_SEM_PRECO_CEDO = "BTC_SEM_PRECO_CEDO"
+
+# adiar_log: o log em arquivo só é configurado no main(); uma falha antes disso é
+# registrada quando ele estiver pronto (liberar_log).
+BUSCA_PRIMEIRO_PRECO = BuscaPrimeiroPreco(adiar_log=True)
+
+
+def _desligado_antes_dos_imports(*variaveis: str) -> bool:
+    """True se alguma variável BTC_SEM_* está ligada E a medição existe neste build.
+
+    Vale antes de MEDICAO_ATIVA existir. O módulo metricas só é importado se alguma
+    variável estiver ligada (o que só o medir_abertura.py faz): no uso normal esta função
+    não importa nada, e na produção, sem o módulo, as variáveis são ignoradas.
+    """
+    if not any(os.environ.get(variavel) == "1" for variavel in variaveis):
+        return False
+    try:
+        import metricas  # noqa: F401, PLC0415
+    except ImportError:
+        return False
+    return True
+
+
+if __name__ == "__main__" and not _desligado_antes_dos_imports(VARIAVEL_SEM_PRECO_PYTHON, VARIAVEL_SEM_PRECO_CEDO):
+    BUSCA_PRIMEIRO_PRECO.iniciar()
+
+# ---------------------------------------------------------------------------
+# .NET em paralelo com os imports.
+#
+# Subir o .NET ("import clr": pythonnet + CLR, ~120 ms) e importar o resto do app (~40 ms)
+# aconteciam um depois do outro. Boa parte do "import clr" roda fora do Python e não
+# prende o GIL: aqui ele roda nesta thread (a mesma em que o pywebview o usaria) enquanto
+# uma thread auxiliar faz os imports pesados. Os imports logo abaixo acham os módulos já
+# carregados (ou esperam o que estiver em andamento), e o "import clr" do pywebview
+# (webview/platforms/winforms.py) acha o .NET pronto. Se algo falhar aqui, o erro fica
+# guardado para o log e esses caminhos normais refazem o trabalho.
+# ---------------------------------------------------------------------------
+import inicio_paralelo  # noqa: E402
+
+# Só na medição (--comparar net-cedo): o .NET sobe só no 1º webview.screens, como antes.
+VARIAVEL_SEM_NET_CEDO = "BTC_SEM_NET_CEDO"
+
+
+def _importar_clr() -> None:
+    import clr  # noqa: F401, PLC0415 - o mesmo import que o pywebview faz
+
+
+def _importar_o_resto() -> None:
+    """Os imports pesados do app, na mesma ordem do topo deste arquivo."""
+    import ssl_ausente  # noqa: PLC0415
+
+    ssl_ausente.garantir()  # antes do "import webview"
+    import configparser  # noqa: F401, PLC0415
+    import contextlib  # noqa: F401, PLC0415
+    import logging  # noqa: F401, PLC0415
+    import logging.handlers  # noqa: F401, PLC0415
+    import pathlib  # noqa: F401, PLC0415
+
+    import webview  # noqa: F401, PLC0415
+
+    import alertas_store  # noqa: F401, PLC0415
+    import argumentos_webview2  # noqa: F401, PLC0415
+    import bordas_janela  # noqa: F401, PLC0415
+    import servidor_local  # noqa: F401, PLC0415
+    import topo_janela  # noqa: F401, PLC0415
+
+
+INICIO_PARALELO: inicio_paralelo.ResultadoParalelo | None = None
+if (__name__ == "__main__" and sys.platform == "win32"
+        and not _desligado_antes_dos_imports(VARIAVEL_SEM_NET_CEDO)):
+    INICIO_PARALELO = inicio_paralelo.rodar(_importar_clr, _importar_o_resto)
+
+import configparser  # noqa: E402
 import contextlib  # noqa: E402
 import logging  # noqa: E402
-import os  # noqa: E402
-import sys  # noqa: E402
 from logging.handlers import RotatingFileHandler  # noqa: E402
 from pathlib import Path  # noqa: E402
 
+# Antes do "import webview": o pywebview importa o ssl no topo, e o executável não o leva.
+import ssl_ausente  # noqa: E402
+
+ssl_ausente.garantir()
+
 import webview  # noqa: E402
 
+import argumentos_webview2  # noqa: E402
 import topo_janela  # noqa: E402
 from bordas_janela import Arrastador, area_livre  # noqa: E402
 from alertas_store import AlertasInvalidosError, RepositorioAlertas  # noqa: E402
-from primeiro_preco import BuscaPrimeiroPreco  # noqa: E402
 from servidor_local import PORTA as PORTA_LOCAL  # noqa: E402
 from servidor_local import criar_aplicativo  # noqa: E402
 
@@ -57,7 +149,7 @@ logger = logging.getLogger("btcstatus")
 class _SemMedicao:
     """Substituto usado no build de produção: não mede nem grava nada."""
 
-    def marcar(self, nome: str) -> None:
+    def marcar(self, nome: str, instante_perf: float | None = None) -> None:
         pass
 
     def medir(self, nome: str):
@@ -65,14 +157,17 @@ class _SemMedicao:
 
 
 METRICAS = RegistroMetricas(PASTA_DADOS, _INICIO_PERF, _INICIO_EPOCH) if MEDICAO_ATIVA else _SemMedicao()
+if INICIO_PARALELO is not None:
+    # Os imports acima já esperaram os módulos em andamento; aqui só o fim da thread.
+    INICIO_PARALELO.esperar_auxiliar(10)
+    METRICAS.marcar("net_cedo_inicio", INICIO_PARALELO.inicio)
+    METRICAS.marcar("net_cedo_clr", INICIO_PARALELO.fim_principal)
+    METRICAS.marcar("net_cedo_imports", INICIO_PARALELO.fim_auxiliar)
 METRICAS.marcar("imports_concluidos")
 
-# 1º preço buscado pelo Python durante a abertura (ver primeiro_preco.py); a página o
-# recebe em /preco-inicial (ver servidor_local.py).
-BUSCA_PRIMEIRO_PRECO = BuscaPrimeiroPreco(METRICAS)
-# Só na medição: tools/medir_abertura.py --comparar preco-python liga esta variável em
-# metade das aberturas, e o Python não busca o preço (a página fica só com o REST).
-VARIAVEL_SEM_PRECO_PYTHON = "BTC_SEM_PRECO_PYTHON"
+# A busca do 1º preço começou antes de o registro de métricas existir (início deste
+# arquivo): os marcos dela foram guardados com o instante de cada um e entram agora.
+BUSCA_PRIMEIRO_PRECO.ligar_metricas(METRICAS)
 
 
 def deve_buscar_preco_pelo_python() -> bool:
@@ -466,6 +561,9 @@ VARIAVEL_SEM_AJUSTE_PRELOAD = "BTC_SEM_AJUSTE_PRELOAD"
 VARIAVEL_SEM_TIPOS_FIXOS = "BTC_SEM_TIPOS_FIXOS"
 # Idem para --comparar preco-no-html: o 1º preço não vai dentro do HTML (só /preco-inicial).
 VARIAVEL_SEM_PRECO_NO_HTML = "BTC_SEM_PRECO_NO_HTML"
+# Idem para --comparar argumentos-webview2 (e tools/medir_trafego.py --comparar-adotados): o
+# WebView2 sobe sem os argumentos extras de argumentos_webview2.py.
+VARIAVEL_SEM_ARGUMENTOS_WEBVIEW2 = "BTC_SEM_ARGUMENTOS_WEBVIEW2"
 
 
 def recurso_desligado_na_medicao(variavel: str) -> bool:
@@ -549,15 +647,23 @@ def abrir_janela() -> None:
             logger.exception("Falha ao salvar a posição e o modo da janela")
 
     janela.events.closing += ao_fechar
+    # Antes de o WebView2 ser criado: sem a rede "de fundo" do navegador (ver o módulo).
+    if not recurso_desligado_na_medicao(VARIAVEL_SEM_ARGUMENTOS_WEBVIEW2):
+        argumentos_webview2.aplicar()
     METRICAS.marcar("webview_start")
     webview.start(user_agent="pywebview", **opcoes_de_armazenamento())
 
 
 def main() -> None:
-    # Primeiro de tudo: a requisição corre em paralelo com o .NET e o WebView2.
+    # A busca do 1º preço normalmente já começou, antes dos imports (início deste arquivo);
+    # aqui só começa se aquele início foi desligado na medição (iniciar() vale uma vez só).
     if deve_buscar_preco_pelo_python():
         BUSCA_PRIMEIRO_PRECO.iniciar()
     configurar_log()
+    BUSCA_PRIMEIRO_PRECO.liberar_log()
+    if INICIO_PARALELO is not None:
+        for erro in INICIO_PARALELO.erros():
+            logger.warning("Início em paralelo (.NET e imports): %s", erro)
     METRICAS.marcar("log_configurado")
     try:
         abrir_janela()

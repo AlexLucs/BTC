@@ -75,7 +75,7 @@ A 1ª execução é a abertura "fria" e costuma ser mais lenta. O app é fechado
 .venv\Scripts\python.exe tools\medir_websocket.py --vezes 10
 ```
 
-Compara as portas 9443 e 443 do stream, alternando a ordem entre elas. Mostra o tempo de conexão e o tempo até a 1ª mensagem. Só vale trocar a porta (em `URL_WS_TICKERS` no `script.js` e no `connect-src` da CSP) se a diferença for grande e se repetir em outra execução.
+Compara as portas 9443 e 443 do stream, alternando a ordem entre elas. Mostra o tempo de conexão e o tempo até a 1ª mensagem. Só vale trocar a porta (em `URL_WS_BASE` no `script.js` e no `connect-src` da CSP) se a diferença for grande e se repetir em outra execução.
 
 ## 2b'. Thread da página ocupada na abertura
 
@@ -97,10 +97,25 @@ Alterna aberturas com e sem o recurso (ordem com, sem, sem, com...). Só o app c
 | `preload-fonte` | `BTC_SEM_AJUSTE_PRELOAD=1` | o servidor local entrega o `index.html` sem acrescentar `crossorigin` ao preload da fonte (por http o preload é descartado e a fonte é lida duas vezes) |
 | `tipos-fixos` | `BTC_SEM_TIPOS_FIXOS=1` | o servidor local deixa o bottle adivinhar o tipo de cada arquivo pelo `mimetypes`, que na 1ª vez lê o registro do Windows |
 | `preco-no-html` | `BTC_SEM_PRECO_NO_HTML=1` | o 1º preço não vai dentro do HTML; a página o pede em `/preco-inicial` (correndo contra o REST) |
+| `preco-cedo` | `BTC_SEM_PRECO_CEDO=1` | a requisição do 1º preço só sai no `main()`, depois dos imports (sem a opção, sai no início do `BTC_Monitor.py`, antes deles) |
+| `net-cedo` | `BTC_SEM_NET_CEDO=1` | o .NET só sobe na 1ª leitura de `webview.screens`, depois dos imports (sem a opção, o `import clr` roda no início do `BTC_Monitor.py`, com os imports numa thread auxiliar) |
+| `argumentos-webview2` | `BTC_SEM_ARGUMENTOS_WEBVIEW2=1` | o WebView2 sobe sem os argumentos extras de `argumentos_webview2.py` (com eles, não consulta `config.edge.skype.com` nem `edge.microsoft.com`) |
 
 A tabela final mostra a mediana de cada metade e o ganho (sem − com) das etapas que dependem da rede, a duração da 1ª requisição a cada servidor (`rede1:<servidor>`, também na seção 2 do relatório comum) e de onde veio o 1º preço (`primeiro_preco:python` / `primeiro_preco:rest`). A tabela também mostra quando a fonte chegou e quantas vezes cada arquivo da página foi lido (`recurso_n:<arquivo>`; o ideal é 1). `--comparar-preconnect` continua valendo.
 
 Na seção 1 do relatório comum aparecem, para cada arquivo da própria página (CSS, JS, fonte, ícone), o instante em que foi pedido e o instante em que chegou (`recurso_inicio:<arquivo>` / `recurso:<arquivo>`), junto das outras etapas: é por aí que se vê o que segura o `load`. Do lado do Python, o servidor local registra quando cada pedido chegou e quando terminou de enviar a resposta (`servidor_pedido:<arquivo>` / `servidor_fim:<arquivo>`). Aceita `--exe` com o build `-ComMedicao`.
+
+## 2d. Tráfego do WebView2 e argumentos extras (rede real)
+
+```
+.venv\Scripts\python.exe tools\medir_trafego.py
+.venv\Scripts\python.exe tools\medir_trafego.py --comparar-adotados --segundos 300
+.venv\Scripts\python.exe tools\medir_trafego.py --argumentos "--outro-argumento"
+.venv\Scripts\python.exe tools\medir_abertura.py --comparar argumentos-webview2 --vezes 20
+```
+`medir_trafego.py` abre o app atrás de um proxy local que só conta bytes por servidor (o HTTPS passa cifrado) e imprime um resumo a cada 30 s e a tabela final. Minimize a janela no meio da medição para ver o tráfego com ela oculta.
+
+O app sobe o WebView2 com os argumentos de `argumentos_webview2.py` (grupo `todos`), pela variável `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`. `--comparar-adotados` mede sem e depois com eles (`BTC_SEM_ARGUMENTOS_WEBVIEW2=1`, que só vale com o módulo `metricas`, como a seção 2c); `--argumentos` testa outros, além dos adotados. Na abertura, `--comparar argumentos-webview2` compara os adotados e `--comparar-argumentos` testa outros. Não aparecem no proxy: a busca do 1º preço pelo Python (WinHTTP) e a página local.
 
 ## 3. Testes de desempenho (laboratório)
 

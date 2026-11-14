@@ -4,6 +4,7 @@
 .DESCRIPTION
     Usa o Python do venv ".venv" (sem ativar o ambiente), roda os testes e
     chama o PyInstaller com o .spec, que e a unica fonte da configuracao do build.
+    Depois confere a pasta gerada com tools\conferir_build.py (tamanho e arquivos excluidos).
     Deve ficar na pasta raiz do projeto, junto do .spec.
 .PARAMETER SemTestes
     Pula os testes antes do build.
@@ -11,6 +12,10 @@
     Inclui a medicao de desempenho (metricas.py e o coletor real do metricas.js),
     para usar com tools\medir_abertura.py --exe. Sem esta opcao o build e o de
     producao, sem nenhuma medicao.
+.PARAMETER Compactar
+    Depois do build, compacta a pasta dist\BTC Monitor para distribuir: gera
+    dist\BTC Monitor.zip e, se o 7-Zip estiver instalado, dist\BTC Monitor.7z
+    (tools\empacotar_build.py). Nao vale com -ComMedicao (build de teste).
 .NOTES
     Para antes de tudo se houver um BTC Monitor.exe aberto a partir da pasta dist
     (ele trava os arquivos que o build precisa apagar).
@@ -18,10 +23,12 @@
     .\criar_exe_btc.ps1
     .\criar_exe_btc.ps1 -SemTestes
     .\criar_exe_btc.ps1 -ComMedicao
+    .\criar_exe_btc.ps1 -Compactar
 #>
 param(
     [switch]$SemTestes,
-    [switch]$ComMedicao
+    [switch]$ComMedicao,
+    [switch]$Compactar
 )
 
 $ErrorActionPreference = "Stop"
@@ -81,8 +88,25 @@ try {
     Remove-Item Env:BTC_BUILD_MEDICAO -ErrorAction SilentlyContinue
     if ($codigo -ne 0) { throw "PyInstaller falhou (codigo $codigo)." }
 
+    # Confere a pasta do build: mostra o tamanho e falha se algum arquivo excluido
+    # (exclusoes_build.py) tiver voltado, por exemplo depois de atualizar uma dependencia.
+    # --trabalho: tambem falha se um modulo do build importar no topo um modulo excluido
+    # ou se faltar um modulo que so o lado .NET do pythonnet importa.
+    & $python "tools\conferir_build.py" (Split-Path $exe) --trabalho (Join-Path $raiz "build\BTC Monitor")
+    if ($LASTEXITCODE -ne 0) { throw "A conferencia do build falhou (ver acima)." }
+
     Write-Host "Executavel gerado: $exe" -ForegroundColor Green
-    Write-Host "Para distribuir, copie a pasta inteira: $(Split-Path $exe)"
+
+    if ($Compactar -and $ComMedicao) {
+        Write-Host "-Compactar ignorado: o build com medicao e so para testes, nao para distribuir." -ForegroundColor Yellow
+    } elseif ($Compactar) {
+        Write-Host "Compactando a pasta do build para distribuir..." -ForegroundColor Cyan
+        & $python "tools\empacotar_build.py" (Split-Path $exe)
+        if ($LASTEXITCODE -ne 0) { throw "Falha ao compactar o build (ver acima)." }
+        Write-Host "Para distribuir, envie um dos arquivos acima; quem recebe extrai a pasta inteira." -ForegroundColor Green
+    } else {
+        Write-Host "Para distribuir, copie a pasta inteira: $(Split-Path $exe) (ou use -Compactar)"
+    }
 }
 catch {
     Write-Host "Erro: $_" -ForegroundColor Red

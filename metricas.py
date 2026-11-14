@@ -167,10 +167,18 @@ class RegistroMetricas:
         """Milissegundos desde a primeira linha do script."""
         return round((time.perf_counter() - self._inicio_perf) * 1000, 3)
 
-    def marcar(self, nome: str) -> None:
-        """Registra o primeiro instante em que um marco da abertura ocorreu."""
+    def marcar(self, nome: str, instante_perf: float | None = None) -> None:
+        """Registra o primeiro instante em que um marco da abertura ocorreu.
+
+        instante_perf: valor de time.perf_counter() de quando o marco ocorreu, para um
+        marco anotado antes de este registro existir (None: agora).
+        """
+        if instante_perf is None:
+            instante_ms = self.agora_ms()
+        else:
+            instante_ms = round((instante_perf - self._inicio_perf) * 1000, 3)
         with self._trava:
-            self._marcos.setdefault(nome, self.agora_ms())
+            self._marcos.setdefault(nome, instante_ms)
 
     @contextmanager
     def medir(self, nome: str) -> Iterator[None]:

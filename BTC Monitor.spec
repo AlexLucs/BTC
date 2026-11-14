@@ -1,5 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
+import sys
+
+# Listas do que fica fora do build por não ser usado (módulos e arquivos): ver
+# exclusoes_build.py, na mesma pasta deste .spec (SPECPATH é definido pelo PyInstaller).
+sys.path.insert(0, SPECPATH)
+from exclusoes_build import MODULOS_OBRIGATORIOS, MODULOS_SEM_USO, OTIMIZACAO_DO_BYTECODE, sem_arquivos_sem_uso
 
 # O setuptools entra no build só porque o cffi (usado pelo pythonnet/clr_loader)
 # o importa em funções de COMPILAR extensões, que o app nunca usa (o clr_loader só
@@ -21,30 +27,48 @@ if not MEDICAO:
     EXCLUIR.append("metricas")
 print(f"[spec] medicao {'INCLUIDA (build de teste)' if MEDICAO else 'REMOVIDA (producao)'}")
 
+# Módulos que o app não usa: da biblioteca padrão (compactação, asyncio, multiprocessing,
+# decimal, xml, ssl/OpenSSL, argparse, tarfile...) com as extensões .pyd deles, as
+# plataformas do pywebview de outros sistemas e a parte do cffi que compila extensões.
+# Vale para os dois builds (produção e medição). Sem o ssl, o app depende de
+# ssl_ausente.py e de baixar_winhttp.py.
+EXCLUIR += MODULOS_SEM_USO
+print(f"[spec] {len(MODULOS_SEM_USO)} modulos sem uso EXCLUIDOS (exclusoes_build.py)")
+
 
 a = Analysis(
     ['BTC_Monitor.py'],
     pathex=[],
     binaries=[],
     datas=[('index.html', '.'), ('regras.js', '.'), ('script.js', '.'), ('style.css', '.'), ('Roboto.woff2', '.'), ('btc-logo.svg', '.'), ('alerta.mp3', '.')],
-    hiddenimports=[],
+    # Módulos que só o lado .NET do pythonnet importa (a análise não os enxerga).
+    hiddenimports=list(MODULOS_OBRIGATORIOS),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=EXCLUIR,
     noarchive=False,
-    optimize=1,
+    optimize=OTIMIZACAO_DO_BYTECODE,
 )
 # metricas.js no pacote: o coletor real ou o substituto vazio, sempre com o nome que o
 # index.html carrega. Entrada no formato TOC do PyInstaller: (destino, origem, tipo).
 a.datas += [("metricas.js", "metricas.js" if MEDICAO else "metricas_desligadas.js", "DATA")]
+
+# Arquivos que os hooks do pywebview e do pythonnet copiam e o app nunca carrega
+# (.jar do Android, .xml de documentação). Os hooks
+# podem listá-los como dados ou como binários: filtra os dois.
+_antes = len(a.datas) + len(a.binaries)
+a.datas = sem_arquivos_sem_uso(a.datas)
+a.binaries = sem_arquivos_sem_uso(a.binaries)
+print(f"[spec] {_antes - len(a.datas) - len(a.binaries)} arquivos sem uso REMOVIDOS (exclusoes_build.py)")
 
 pyz = PYZ(a.pure)
 
 exe = EXE(
     pyz,
     a.scripts,
-    [('O', None, 'OPTION')],
+    # Uma opção "O" por nível: o interpretador do .exe roda no mesmo nível do bytecode.
+    [('O', None, 'OPTION')] * OTIMIZACAO_DO_BYTECODE,
     exclude_binaries=True,
     name='BTC Monitor',
     debug=False,

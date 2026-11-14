@@ -154,7 +154,10 @@ def _criar_rotas(pasta: Path, html_da_pagina: Callable[[], str], busca_preco, aj
         if modo_compacto():
             html = marcar_compacto(html)
         if preco_no_html and "</head>" in html:
-            dados = busca_preco.resultado(0)  # sem esperar; a entrega é única
+            # Sem esperar; a entrega é única. (Esperar até 15 ms aqui pelo preço foi
+            # medido e não trouxe ganho: com a busca saindo antes dos imports, o preço já
+            # chega antes do pedido do HTML.)
+            dados = busca_preco.resultado(0)
             if dados is not None:
                 html = embutir_preco(html, dados)
                 marcar("servidor_preco_no_html")
