@@ -182,7 +182,7 @@ def test_apos_um_alarme_a_inatividade_espera_nova_atividade(navegador, evento):
         if pagina.evaluate("document.getElementById('dialogo').open"):
             break
         pagina.clock.run_for(1000)
-    assert pagina.evaluate("alertaAberto"), "o alarme não disparou"
+    assert pagina.evaluate("alarmesPendentes.size === 1"), "o alarme não disparou"
     # Fecha sem nenhum evento de usuário: o alerta vira desativado.
     pagina.evaluate("document.getElementById('dialogo').close()")
     for _ in range(50):  # o evento "close" do <dialog> chega numa tarefa à parte
@@ -203,6 +203,222 @@ def test_apos_um_alarme_a_inatividade_espera_nova_atividade(navegador, evento):
     pagina.clock.fast_forward(501_000)
     pagina.clock.run_for(2000)
     assert pagina.evaluate("ativo") is False  # ~17 min depois da atividade: pausa
+    contexto.close()
+
+
+# ---------------------------------------------------------------------------
+# Alarme: 3 toques, sai da tela após 2 min sem movimento e volta (1 toque) no 1º movimento
+# ---------------------------------------------------------------------------
+
+# Som falso: conta os play()/pause() e termina cada toque 2,1 s depois (como o alerta.mp3),
+# no relógio da página (clock.install). "falhar" recusa o som, como o navegador sem permissão.
+AUDIO_FALSO = """
+window.__toques = 0;
+window.__pausas = 0;
+window.Audio = class extends EventTarget {
+    constructor(src) { super(); this.src = src; this.preload = ''; this.currentTime = 0; this._fim = 0; }
+    play() {
+        if (window.__falharSom) return Promise.reject(new Error('som recusado'));
+        window.__toques++;
+        clearTimeout(this._fim);
+        this._fim = setTimeout(() => this.dispatchEvent(new Event('ended')), 2100);
+        return Promise.resolve();
+    }
+    pause() { window.__pausas++; clearTimeout(this._fim); }
+};
+"""
+ESPERA_OCULTAR_S = 120
+
+
+def dialogo_aberto(pagina) -> bool:
+    return pagina.evaluate("document.getElementById('dialogo').open")
+
+
+def esperar_pagina(pagina, condicao: str, passos: int = 50) -> None:
+    """Avança o relógio aos poucos até a condição valer (o "close" do <dialog> chega numa tarefa à parte)."""
+    for _ in range(passos):
+        if pagina.evaluate(condicao):
+            return
+        pagina.clock.run_for(100)
+        pagina.wait_for_timeout(20)
+    raise AssertionError(f"condição não atingida: {condicao}")
+
+
+def mover(pagina, x: int = 0, tipo: str = "mousemove") -> None:
+    eventos = {
+        "mousemove": f"new MouseEvent('mousemove', {{ screenX: {x}, screenY: 7 }})",
+        "keydown": "new KeyboardEvent('keydown', { key: 'Shift' })",
+        "pointerdown": "new PointerEvent('pointerdown')",
+    }
+    pagina.evaluate(f"document.dispatchEvent({eventos[tipo]})")
+
+
+def situacao(pagina, id_alerta: str = "a"):
+    return pagina.evaluate(f"alarmesPendentes.get('{id_alerta}')?.situacao ?? null")
+
+
+def abrir_com_alarme(navegador, alertas=ALERTA_QUE_DISPARARIA, falhar_som: bool = False):
+    """Abre a página com o relógio controlado e espera o 1º alarme aparecer."""
+    contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=False, com_alertas=alertas)
+    contexto.add_init_script(AUDIO_FALSO)
+    if falhar_som:
+        contexto.add_init_script("window.__falharSom = true;")
+    pagina.clock.install()
+    pagina.goto(INDEX_URL)
+    esperar_carregamento(pagina)
+    for _ in range(20):  # silêncio inicial (5 s) + checagem (1 s)
+        if dialogo_aberto(pagina):
+            break
+        pagina.clock.run_for(1000)
+    assert dialogo_aberto(pagina), "o alarme não disparou"
+    return contexto, pagina, erros
+
+
+def terminar_toques(pagina) -> float:
+    """Deixa os toques acabarem; devolve quantos ms faltam para o alarme sair da tela."""
+    pagina.clock.run_for(3 * 2100 + 100)
+    restante = pagina.evaluate("alarmeNaTela().fimDosToques + ESPERA_OCULTAR_ALARME - Date.now()")
+    assert restante > 0
+    return restante
+
+
+def test_alarme_toca_tres_vezes_e_para(navegador):
+    contexto, pagina, erros = abrir_com_alarme(navegador)
+    assert pagina.evaluate("window.__toques") == 1
+    pagina.clock.run_for(2100)
+    assert pagina.evaluate("window.__toques") == 2
+    pagina.clock.run_for(2100)
+    assert pagina.evaluate("window.__toques") == 3
+    pagina.clock.run_for(60_000)
+    assert pagina.evaluate("window.__toques") == 3
+    assert dialogo_aberto(pagina)
+    assert not erros, erros
+    contexto.close()
+
+
+def test_alarme_sai_da_tela_2_min_apos_o_3o_toque_sem_desativar(navegador):
+    contexto, pagina, erros = abrir_com_alarme(navegador)
+    restante = terminar_toques(pagina)
+    assert pagina.evaluate("timers.ocultarAlarme") != 0
+    pagina.clock.run_for(int(restante) - 1000)
+    assert dialogo_aberto(pagina), "saiu antes dos 2 min"
+    pagina.clock.run_for(1000)
+    esperar_pagina(pagina, "alarmesPendentes.get('a')?.situacao === 'oculto'")
+    assert situacao(pagina) == "oculto"
+    # Continua valendo: não foi desativado nem gravado como desativado.
+    assert pagina.evaluate("alertas[0].tipo") == "maior"
+    assert json.loads(pagina.evaluate("localStorage.getItem('alertasjson')"))[0]["tipo"] == "maior"
+    # E não dispara de novo enquanto pendente.
+    pagina.clock.run_for(30_000)
+    assert not dialogo_aberto(pagina) and pagina.evaluate("window.__toques") == 3
+    assert not erros, erros
+    contexto.close()
+
+
+def test_movimento_durante_a_espera_adia_a_saida(navegador):
+    contexto, pagina, erros = abrir_com_alarme(navegador)
+    terminar_toques(pagina)
+    pagina.clock.run_for(60_000)
+    mover(pagina, 10)  # o prazo recomeça daqui
+    pagina.clock.run_for(ESPERA_OCULTAR_S * 1000 - 1000)
+    assert dialogo_aberto(pagina), "o movimento deveria ter adiado a saída"
+    pagina.clock.run_for(1000)
+    esperar_pagina(pagina, "alarmesPendentes.get('a')?.situacao === 'oculto'")
+    assert situacao(pagina) == "oculto"
+    assert not erros, erros
+    contexto.close()
+
+
+@pytest.mark.parametrize("tipo", ["mousemove", "keydown", "pointerdown"])
+def test_alarme_oculto_volta_no_1o_movimento_com_1_toque_e_fica(navegador, tipo):
+    contexto, pagina, erros = abrir_com_alarme(navegador)
+    restante = terminar_toques(pagina)
+    pagina.clock.run_for(int(restante))
+    esperar_pagina(pagina, "alarmesPendentes.get('a')?.situacao === 'oculto'")
+
+    mover(pagina, 20, tipo)
+    assert dialogo_aberto(pagina)
+    assert situacao(pagina) == "tela"
+    assert pagina.evaluate("window.__toques") == 4  # 3 + 1
+    # Depois de voltar, fica até o OK: nem sai de novo nem toca mais.
+    pagina.clock.run_for(10 * 60_000)
+    assert dialogo_aberto(pagina) and pagina.evaluate("window.__toques") == 4
+    assert pagina.evaluate("timers.ocultarAlarme") == 0
+
+    pagina.click("#dialogo-ok")
+    esperar_pagina(pagina, "alarmesPendentes.size === 0")
+    assert pagina.evaluate("alertas[0].tipo") == "desativado"
+    assert not erros, erros
+    contexto.close()
+
+
+def test_mousemove_sem_deslocamento_nao_traz_o_alarme_de_volta(navegador):
+    """Um mousemove no mesmo lugar (ex.: gerado quando o diálogo some sob o cursor parado) não conta."""
+    contexto, pagina, erros = abrir_com_alarme(navegador)
+    mover(pagina, 5)  # durante os toques: não impede a saída (o prazo conta do fim dos toques)
+    restante = terminar_toques(pagina)
+    pagina.clock.run_for(int(restante))
+    esperar_pagina(pagina, "alarmesPendentes.get('a')?.situacao === 'oculto'")
+    mover(pagina, 5)  # mesma posição
+    assert not dialogo_aberto(pagina) and situacao(pagina) == "oculto"
+    mover(pagina, 6)  # controle: deslocamento real traz de volta
+    assert dialogo_aberto(pagina) and situacao(pagina) == "tela"
+    assert not erros, erros
+    contexto.close()
+
+
+def test_ok_durante_os_toques_para_o_som_e_desativa(navegador):
+    contexto, pagina, erros = abrir_com_alarme(navegador)
+    pagina.clock.run_for(2100)  # 2º toque em andamento
+    pagina.click("#dialogo-ok")
+    esperar_pagina(pagina, "alarmesPendentes.size === 0")
+    assert pagina.evaluate("window.__pausas") >= 1
+    pagina.clock.run_for(10_000)
+    assert pagina.evaluate("window.__toques") == 2
+    assert pagina.evaluate("alertas[0].tipo") == "desativado"
+    assert not erros, erros
+    contexto.close()
+
+
+def test_alarme_oculto_nao_impede_os_outros(navegador):
+    """Ordem da lista (maior valor primeiro): "a" (menor 10 mi) dispara antes de "b" (maior 100)."""
+    alertas = [{"id": "a", "valor": 10_000_000, "tipo": "menor"}, {"id": "b", "valor": 100, "tipo": "maior"}]
+    contexto, pagina, erros = abrir_com_alarme(navegador, alertas=alertas)
+    assert situacao(pagina, "a") == "tela" and situacao(pagina, "b") is None  # um alarme por vez
+    restante = terminar_toques(pagina)
+    pagina.clock.run_for(int(restante))
+    esperar_pagina(pagina, "alarmesPendentes.get('a').situacao === 'oculto'")
+
+    # Com "a" oculto, "b" dispara normalmente (3 toques); "a" não dispara de novo.
+    esperar_pagina(pagina, "document.getElementById('dialogo').open", passos=200)
+    assert situacao(pagina, "b") == "tela"
+    pagina.clock.run_for(3 * 2100 + 100)
+    assert pagina.evaluate("window.__toques") == 6
+
+    # O movimento põe "a" na fila atrás de "b"; ao fechar "b", "a" aparece com 1 toque.
+    mover(pagina, 30)
+    assert situacao(pagina, "a") == "fila"
+    pagina.click("#dialogo-ok")
+    esperar_pagina(pagina, "alarmesPendentes.get('a')?.situacao === 'tela'")
+    assert pagina.evaluate("window.__toques") == 7
+    assert "R$ 10.000.000,00" in texto(pagina, "#dialogo-conteudo")
+    assert pagina.evaluate("alertas.find(a => a.id === 'b').tipo") == "desativado"
+    assert pagina.evaluate("alertas.find(a => a.id === 'a').tipo") == "menor"
+    assert not erros, erros
+    contexto.close()
+
+
+def test_som_recusado_ainda_conta_o_prazo_para_sair(navegador):
+    contexto, pagina, erros = abrir_com_alarme(navegador, falhar_som=True)
+    pagina.wait_for_timeout(50)  # a recusa do play() chega como promessa rejeitada
+    restante = pagina.evaluate("alarmeNaTela().fimDosToques + ESPERA_OCULTAR_ALARME - Date.now()")
+    assert 0 < restante <= ESPERA_OCULTAR_S * 1000
+    pagina.clock.run_for(int(restante))
+    esperar_pagina(pagina, "alarmesPendentes.get('a').situacao === 'oculto'")
+    # O aviso da falha do som aparece depois do alarme, não na frente dele.
+    esperar_pagina(pagina, "document.getElementById('dialogo').open")
+    assert texto(pagina, "#dialogo-conteudo") == "Falha ao reproduzir áudio."
+    assert not erros, erros
     contexto.close()
 
 
@@ -1362,6 +1578,76 @@ def test_reativar_sem_preco_novo_usa_o_da_tela_ou_maior(navegador, estado_salvo,
     assert pagina.evaluate("alertas[0].tipo") == ("menor" if estado_salvo else "maior")
     pagina.evaluate("alternarTelaAlerta()")
     assert tipo_na_tabela(pagina, "a") == rotulo
+    assert not erros, erros
+    contexto.close()
+
+
+def criar_pelo_formulario(pagina, valor: str) -> None:
+    pagina.fill("#valorAlerta", valor)
+    pagina.press("#valorAlerta", "Enter")
+
+
+def tipo_do_valor(pagina, valor: float):
+    return pagina.evaluate(f"alertas.find(a => a.valor === {valor})?.tipo ?? null")
+
+
+@pytest.mark.parametrize("valor, tipo, rotulo", [
+    ("400000", "menor", "Menor ▽"),   # preço (~500 mil) acima do valor: "maior" dispararia
+    ("900000", "maior", "Maior △"),   # preço abaixo do valor: "menor" dispararia
+])
+def test_criar_alerta_nasce_pelo_lado_que_nao_dispara(navegador, valor, tipo, rotulo):
+    contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=False, com_alertas=False)
+    pagina.goto(INDEX_URL)
+    esperar_carregamento(pagina)
+    pagina.wait_for_function("Number.isFinite(ultimoPrecoBRL)")
+    pagina.evaluate("alternarTelaAlerta()")
+    criar_pelo_formulario(pagina, valor)
+    alerta = salvos(pagina)[0]
+    assert (alerta["valor"], alerta["tipo"]) == (float(valor), tipo)
+    assert tipo_na_tabela(pagina, alerta["id"]) == rotulo
+    assert pagina.evaluate("alarmesSilenciados") is True
+    assert pagina.input_value("#valorAlerta") == ""
+    assert not erros, erros
+    contexto.close()
+
+
+@pytest.mark.parametrize("estado_salvo, tipo", [(True, "menor"), (False, "maior")])
+def test_criar_alerta_sem_preco_novo_usa_o_da_tela_ou_maior(navegador, estado_salvo, tipo):
+    """Sem preço novo (Binance retida): vale o preço salvo na tela (432.100); sem nenhum, "maior"."""
+    rede = RedeSimulada()
+    rede.segurar_binance = True
+    contexto, pagina, erros = nova_pagina(navegador, rede, acelerar=False, com_alertas=False)
+    if estado_salvo:
+        com_estado_salvo(contexto)
+    pagina.goto(INDEX_URL)
+    pagina.wait_for_function("typeof criarAlerta === 'function' && ui !== null")
+    assert pagina.evaluate("Number.isFinite(ultimoPrecoBRL)") is False
+    # Sem estado salvo, a tela de carregamento cobre a página: o campo é preenchido por script.
+    pagina.evaluate("ui.campoValor.value = '400000'; criarAlerta()")
+    assert tipo_do_valor(pagina, 400_000) == tipo
+    assert not erros, erros
+    contexto.close()
+
+
+def test_criar_alerta_recusa_duplicado_pelo_tipo_calculado(navegador):
+    """Com o preço em ~500 mil, 400 mil nasce "menor": colide com um "menor" de mesmo valor,
+    mas não com um "maior" (antes a criação era sempre "maior" e colidia com ele)."""
+    alertas = [{"id": "m", "valor": 400_000, "tipo": "menor"}, {"id": "M", "valor": 300_000, "tipo": "maior"}]
+    contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=False, com_alertas=alertas)
+    pagina.goto(INDEX_URL)
+    esperar_carregamento(pagina)
+    pagina.wait_for_function("Number.isFinite(ultimoPrecoBRL)")
+    pagina.evaluate("alternarTelaAlerta()")
+
+    criar_pelo_formulario(pagina, "400000")
+    pagina.wait_for_function("document.getElementById('dialogo').open")
+    assert pagina.locator("#dialogo-conteudo").text_content() == "Existe um alerta com esse mesmo valor."
+    assert salvos(pagina) == alertas
+    pagina.click("#dialogo-ok")
+
+    criar_pelo_formulario(pagina, "300000")
+    pagina.wait_for_function("alertas.length === 3")
+    assert sorted(a["tipo"] for a in salvos(pagina) if a["valor"] == 300_000) == ["maior", "menor"]
     assert not erros, erros
     contexto.close()
 
