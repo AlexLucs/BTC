@@ -65,6 +65,13 @@ const TIMEOUT_API_PYTHON = 5000;
 const ATRASO_CHECAGEM_ALARMES = 1000;
 const SILENCIO_PADRAO = 15000;
 const SILENCIO_APOS_CARREGAR = 5000;
+// Alarme: o som toca TOQUES_ALARME vezes quando o diálogo aparece e para. Sem movimento
+// (mouse, tecla ou clique) por ESPERA_OCULTAR_ALARME depois do último toque, o diálogo sai
+// da tela sem desativar o alerta; o 1º movimento o traz de volta com TOQUES_AO_REAPARECER,
+// e daí ele fica até o OK.
+const TOQUES_ALARME = 3;
+const TOQUES_AO_REAPARECER = 1;
+const ESPERA_OCULTAR_ALARME = 2 * 60 * 1000;
 const LIMITE_INATIVIDADE = 1000 * 1000; // ~17 min sem mouse/teclado pausa o monitoramento
 const INTERVALO_VERIFICAR_INATIVIDADE = 1000;
 const INTERVALO_SALVAR_ESTADO = 30000;  // no máximo uma gravação do último estado a cada 30 s
@@ -153,8 +160,14 @@ let ultimaMensagemBRL = 0;        // performance.now() da última mensagem de BT
 
 let alertas = [];                 // lista em memória (normalizada e ordenada): fonte da verdade no JS
 let alarmesSilenciados = false;
-let alertaAberto = false;
+// Alarmes disparados que ainda esperam o OK, por id do alerta:
+// { alerta, situacao: 'fila' | 'tela' | 'oculto', reapareceu, fimDosToques }.
+// Os da fila e da tela impedem novos disparos (um alarme por vez); os ocultos não.
+const alarmesPendentes = new Map();
 let audioAlerta = null;
+let controleSom = null;           // AbortController da sequência de toques em andamento
+let ultimoMovimento = 0;          // Date.now() do último mouse/tecla/clique do usuário
+let ultimaPosicaoMouse = null;    // "screenX,screenY" do último mousemove que contou
 
 let graficoVisivel = false;       // escolha do usuário pelo botão ⇄ (padrão: atributo "hidden" de #grafico no HTML)
 let graficoLiberado = false;      // a abertura já passou do ponto em que o gráfico pode ser montado (aposCarregarPagina)
@@ -170,7 +183,7 @@ let alarmeSemAtividade = false;
 let wakeLock = null;
 let pedindoWakeLock = false;
 
-const timers = { preco: 0, taxas: 0, dolar: 0, alarmes: 0, silencio: 0, wsVigia: 0, wsSonda: 0, wsReconexao: 0 };
+const timers = { preco: 0, taxas: 0, dolar: 0, alarmes: 0, silencio: 0, ocultarAlarme: 0, wsVigia: 0, wsSonda: 0, wsReconexao: 0 };
 
 const el = id => document.getElementById(id);
 
@@ -1279,12 +1292,29 @@ function atualizarBotaoPausa() {
 /** Conta como atividade sem retomar nada (os cliques têm as ações deles: ⏸, ■, OK...). */
 function registrarAtividade() {
 	ultimaInteracao = Date.now();
+	ultimoMovimento = ultimaInteracao;
 	alarmeSemAtividade = false;
+	// Alarme na tela esperando para sair: o prazo recomeça. Armado a partir do evento, nunca
+	// de dentro de outro timer (timers aninhados são estrangulados com a página oculta).
+	if (timers.ocultarAlarme) armarOcultacaoDoAlarme();
+	reaparecerAlarmes();
 }
 
 function registrarInteracao() {
 	registrarAtividade();
 	if (!ativo && !pausaManual) retomar({ silenciar: false });
+}
+
+/**
+ * Só conta o mousemove em que o ponteiro mudou de lugar: um evento sem deslocamento (ex.:
+ * gerado pelo navegador quando o conteúdo sob o cursor parado muda, como o diálogo saindo
+ * da tela) traria o alarme de volta na hora.
+ */
+function aoMoverMouse(evento) {
+	const posicao = `${evento.screenX},${evento.screenY}`;
+	if (posicao === ultimaPosicaoMouse) return;
+	ultimaPosicaoMouse = posicao;
+	registrarInteracao();
 }
 
 function verificarInatividade() {
@@ -1456,10 +1486,15 @@ const filaDialogos = [];
 let dialogoAtual = null;
 
 /**
- * @param {{titulo: string, linhas: string[], autoFecharMs?: number, aoFechar?: Function}} opcoes
+ * Alarmes (opcoes.alarme = id do alerta) passam à frente dos avisos na fila, na ordem em
+ * que chegaram: o som só toca quando o diálogo aparece.
+ * @param {{titulo: string, linhas: string[], autoFecharMs?: number, alarme?: string,
+ *          aoFechar?: (ocultado: boolean) => void}} opcoes
  */
 function mostrarDialogo(opcoes) {
-	filaDialogos.push(opcoes);
+	const antesDe = opcoes.alarme ? filaDialogos.findIndex(d => !d.alarme) : -1;
+	if (antesDe < 0) filaDialogos.push(opcoes);
+	else filaDialogos.splice(antesDe, 0, opcoes);
 	if (!dialogoAtual) exibirProximoDialogo();
 }
 
@@ -1493,13 +1528,15 @@ function exibirProximoDialogo() {
 	}
 	dialogo.showModal();
 	botao.focus();
+	if (dialogoAtual.alarme) aoExibirAlarme(dialogoAtual.alarme);
 }
 
+/** Fechado pelo usuário (OK/Esc) ou tirado da tela por falta de movimento (ocultar). */
 function aoFecharDialogo() {
 	const encerrado = dialogoAtual;
 	clearInterval(encerrado?.contagem);
 	try {
-		encerrado?.aoFechar?.();
+		encerrado?.aoFechar?.(encerrado.ocultar === true);
 	} finally {
 		exibirProximoDialogo();
 	}
@@ -1590,36 +1627,146 @@ function silenciarAlarmes(duracao = SILENCIO_PADRAO) {
 	timers.silencio = setTimeout(() => { alarmesSilenciados = false; }, duracao);
 }
 
+/** Algum alarme na tela ou esperando a vez na fila (os ocultos não contam). */
+function existeAlarmeVisivel() {
+	for (const pendente of alarmesPendentes.values()) {
+		if (pendente.situacao !== 'oculto') return true;
+	}
+	return false;
+}
+
 function checarAlarmes() {
-	if (alarmesSilenciados || alertaAberto) return;
+	if (alarmesSilenciados || existeAlarmeVisivel()) return;
 	// O preço mantido na tela durante falhas não dispara alarmes.
 	const preco = falhasBRL === 0 ? ultimoPrecoBRL : NaN;
-	const alerta = Metricas.medir('alarmes:checar', () => alertaParaDisparar(alertas, preco));
+	// Um alarme pendente (oculto) não dispara de novo, mas não impede os outros.
+	const pendentes = new Set(alarmesPendentes.keys());
+	const alerta = Metricas.medir('alarmes:checar', () => alertaParaDisparar(alertas, preco, pendentes));
 	if (alerta) dispararAlerta(alerta);
 }
 
 function dispararAlerta(alerta) {
-	alertaAberto = true;
 	alarmeSemAtividade = true;
+	alarmesPendentes.set(alerta.id, { alerta, situacao: 'fila', reapareceu: false, fimDosToques: NaN });
+	mostrarAlarme(alerta.id);
+}
+
+/** Põe o diálogo do alarme na fila (ao disparar e ao reaparecer). */
+function mostrarAlarme(id) {
+	const pendente = alarmesPendentes.get(id);
+	pendente.situacao = 'fila';
+	const { alerta } = pendente;
 	const mensagem = alerta.tipo === TIPO.MAIOR ? 'O Preço do Bitcoin superou' : 'O Preço do Bitcoin caiu abaixo de';
 	mostrarDialogo({
 		titulo: 'ALERTA',
 		linhas: [mensagem, formatoBRL.format(alerta.valor)],
-		aoFechar: () => {
-			alertaAberto = false;
-			const atualizada = desativarAposDisparo(alertas, alerta.id);
-			if (atualizada === alertas) return; // o alerta foi apagado enquanto o diálogo estava aberto
-			gravarAlertas(atualizada);
-			if (modalAlertaAberto()) renderizarTabelaAlertas();
-		},
+		alarme: id,
+		aoFechar: ocultado => fecharAlarme(id, ocultado),
 	});
-	tocarAlerta();
 }
 
-function tocarAlerta() {
+/** O diálogo do alarme apareceu: toca o som (3 vezes; 1 ao reaparecer). */
+function aoExibirAlarme(id) {
+	const pendente = alarmesPendentes.get(id);
+	if (!pendente) return;
+	pendente.situacao = 'tela';
+	tocarAlerta(pendente.reapareceu ? TOQUES_AO_REAPARECER : TOQUES_ALARME, () => {
+		// Só na 1ª exibição o alarme pode sair da tela; depois de reaparecer, fica até o OK.
+		if (pendente.reapareceu || alarmeNaTela() !== pendente) return;
+		pendente.fimDosToques = Date.now();
+		armarOcultacaoDoAlarme();
+	});
+}
+
+/** O alarme exibido agora no diálogo, se houver. */
+function alarmeNaTela() {
+	const pendente = dialogoAtual?.alarme ? alarmesPendentes.get(dialogoAtual.alarme) : null;
+	return pendente?.situacao === 'tela' ? pendente : null;
+}
+
+/** (Re)arma a saída do alarme da tela: ESPERA_OCULTAR_ALARME sem movimento após os toques. */
+function armarOcultacaoDoAlarme() {
+	clearTimeout(timers.ocultarAlarme);
+	timers.ocultarAlarme = 0;
+	const pendente = alarmeNaTela();
+	if (!pendente) return;
+	const instante = instanteDeOcultar(pendente.fimDosToques, ultimoMovimento, ESPERA_OCULTAR_ALARME);
+	if (!Number.isFinite(instante)) return;
+	timers.ocultarAlarme = setTimeout(() => {
+		timers.ocultarAlarme = 0;
+		if (alarmeNaTela() !== pendente) return;
+		dialogoAtual.ocultar = true; // aoFecharDialogo: sai da tela sem desativar o alerta
+		el('dialogo').close();
+	}, Math.max(0, instante - Date.now()));
+}
+
+/** Movimento do usuário: os alarmes ocultos voltam (com 1 toque cada, ao aparecer). */
+function reaparecerAlarmes() {
+	for (const [id, pendente] of alarmesPendentes) {
+		if (pendente.situacao !== 'oculto') continue;
+		pendente.reapareceu = true;
+		pendente.fimDosToques = NaN;
+		mostrarAlarme(id);
+	}
+}
+
+/** OK/Esc: para o som e desativa o alerta. Saída por falta de movimento: fica pendente. */
+function fecharAlarme(id, ocultado) {
+	clearTimeout(timers.ocultarAlarme);
+	timers.ocultarAlarme = 0;
+	pararSom();
+	const pendente = alarmesPendentes.get(id);
+	if (!pendente) return;
+	if (ocultado) {
+		pendente.situacao = 'oculto';
+		return;
+	}
+	alarmesPendentes.delete(id);
+	const atualizada = desativarAposDisparo(alertas, id);
+	if (atualizada === alertas) return; // o alerta foi apagado enquanto o diálogo estava aberto
+	gravarAlertas(atualizada);
+	if (modalAlertaAberto()) renderizarTabelaAlertas();
+}
+
+/**
+ * Toca o som "vezes" vezes seguidas (pelo evento "ended", sem timer) e chama aoTerminar.
+ * Se o navegador recusar o som, avisa e encerra na hora (o prazo do alarme começa assim mesmo).
+ */
+function tocarAlerta(vezes, aoTerminar) {
+	pararSom();
 	audioAlerta ??= new Audio('alerta.mp3');
-	audioAlerta.currentTime = 0;
-	audioAlerta.play().catch(() => aviso('FALHA', 'Falha ao reproduzir áudio.', 3000));
+	const audio = audioAlerta;
+	const controle = new AbortController();
+	controleSom = controle;
+	let restantes = vezes;
+	const encerrar = () => {
+		controle.abort();
+		if (controleSom === controle) controleSom = null;
+		aoTerminar?.();
+	};
+	const tocar = () => {
+		audio.currentTime = 0;
+		audio.play().catch(() => {
+			if (controle.signal.aborted) return; // interrompido de propósito (OK)
+			aviso('FALHA', 'Falha ao reproduzir áudio.', 3000);
+			encerrar();
+		});
+	};
+	audio.addEventListener('ended', () => {
+		restantes--;
+		if (restantes > 0) tocar();
+		else encerrar();
+	}, { signal: controle.signal });
+	tocar();
+}
+
+/** Interrompe a sequência de toques em andamento (o aoTerminar dela não é chamado). */
+function pararSom() {
+	if (!controleSom) return;
+	controleSom.abort();
+	controleSom = null;
+	audioAlerta?.pause();
+	if (audioAlerta) audioAlerta.currentTime = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1638,18 +1785,20 @@ function alternarTelaAlerta() {
 	else ui.campoValor.value = '';
 }
 
-function criarAlerta() {
-	const valor = converterValor(ui.campoValor.value);
+const MENSAGEM_CRIACAO = {
+	invalido: 'Digite um número válido maior que zero.',
+	duplicado: 'Existe um alerta com esse mesmo valor.',
+	limite: `Limite de ${MAX_ALERTAS} alertas atingido.`,
+};
 
-	if (valor === null) {
-		aviso('FALHA', 'Digite um número válido maior que zero.', 15000);
-	} else if (existeDuplicado(alertas, valor, TIPO.MAIOR)) {
-		aviso('FALHA', 'Existe um alerta com esse mesmo valor.', 15000);
-	} else if (alertas.length >= MAX_ALERTAS) {
-		aviso('FALHA', `Limite de ${MAX_ALERTAS} alertas atingido.`, 15000);
-	} else {
-		gravarAlertas([...alertas, { id: novoId(), valor, tipo: TIPO.MAIOR }]);
+/** O alerta novo nasce pelo lado que não dispara com o preço atual (criarNovoAlerta). */
+function criarAlerta() {
+	const resultado = criarNovoAlerta(alertas, ui.campoValor.value, precoParaReativar());
+	if (resultado.lista) {
+		gravarAlertas(resultado.lista);
 		silenciarAlarmes();
+	} else {
+		aviso('FALHA', MENSAGEM_CRIACAO[resultado.erro], 15000);
 	}
 	renderizarTabelaAlertas();
 }
@@ -1660,7 +1809,7 @@ function apagarAlerta(id) {
 }
 
 /**
- * Preço usado para escolher o lado de um alerta reativado: o dos alarmes (novo e sem
+ * Preço usado para escolher o lado de um alerta novo ou reativado: o dos alarmes (novo e sem
  * falha do BTC/BRL); sem ele, o que está na tela (estado salvo); sem nenhum, NaN ("maior").
  */
 function precoParaReativar() {
@@ -1876,7 +2025,7 @@ function registrarEventos() {
 	el('dialogo').addEventListener('close', aoFecharDialogo);
 
 	document.addEventListener('keydown', registrarInteracao, { passive: true });
-	document.addEventListener('mousemove', registrarInteracao, { passive: true });
+	document.addEventListener('mousemove', aoMoverMouse, { passive: true });
 	// Um clique sem mover o mouse (ex.: fechar o alarme com o ponteiro já sobre o OK) também é atividade.
 	// Não retoma a pausa por inatividade: quem retoma é o movimento ou o clique no ⏸.
 	document.addEventListener('pointerdown', registrarAtividade, { passive: true });

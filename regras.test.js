@@ -79,8 +79,32 @@ test('editarValorAlerta muda o valor, reordena e reativa o desativado como maior
 	] });
 	assert.equal(lista[0].valor, 30);
 
-	// Desativado volta a valer como "maior".
+	// Desativado volta a valer pelo lado que não dispara com o preço atual (valor novo).
+	assert.deepEqual(r.editarValorAlerta(lista, 'b', 40, 35).lista[0], { id: 'b', valor: 40, tipo: 'maior' });
+	assert.deepEqual(r.editarValorAlerta(lista, 'b', 40, 45).lista[0], { id: 'b', valor: 40, tipo: 'menor' });
+	// Sem preço: "maior".
 	assert.deepEqual(r.editarValorAlerta(lista, 'b', 40).lista[0], { id: 'b', valor: 40, tipo: 'maior' });
+});
+
+test('tipoAoReativar escolhe o lado que não dispara; igual ou sem preço → maior', () => {
+	assert.equal(r.tipoAoReativar(100, 150), 'menor');
+	assert.equal(r.tipoAoReativar(100, 50), 'maior');
+	assert.equal(r.tipoAoReativar(100, 100), 'maior');
+	for (const semPreco of [NaN, undefined, null, Infinity]) {
+		assert.equal(r.tipoAoReativar(100, semPreco), 'maior', String(semPreco));
+	}
+	// O tipo escolhido nunca dispara com o mesmo preço (exceto no empate, em que os dois disparariam).
+	for (const preco of [50, 150]) {
+		assert.equal(r.deveDisparar({ valor: 100, tipo: r.tipoAoReativar(100, preco) }, preco), false, String(preco));
+	}
+});
+
+test('proximoTipo: Maior → Menor → Desativado → lado que não dispara', () => {
+	assert.equal(r.proximoTipo({ valor: 100, tipo: 'maior' }, 150), 'menor');
+	assert.equal(r.proximoTipo({ valor: 100, tipo: 'menor' }, 150), 'desativado');
+	assert.equal(r.proximoTipo({ valor: 100, tipo: 'desativado' }, 150), 'menor');
+	assert.equal(r.proximoTipo({ valor: 100, tipo: 'desativado' }, 50), 'maior');
+	assert.equal(r.proximoTipo({ valor: 100, tipo: 'desativado' }, NaN), 'maior');
 });
 
 test('editarValorAlerta recusa valor inválido, igual, duplicado e alerta inexistente', () => {
@@ -98,8 +122,51 @@ test('editarValorAlerta recusa valor inválido, igual, duplicado e alerta inexis
 	assert.ok(r.editarValorAlerta(lista, 'c', '30').lista);
 	// Mesmo valor e mesmo tipo de outro alerta: recusado.
 	assert.deepEqual(r.editarValorAlerta([...lista, { id: 'd', valor: 5, tipo: 'menor' }], 'a', '5'), { erro: 'duplicado' });
-	// O desativado reativado como "maior" colide com um "maior" de mesmo valor.
+	// O desativado reativado (sem preço: "maior") colide com um "maior" de mesmo valor...
 	assert.deepEqual(r.editarValorAlerta(lista, 'b', '10'), { erro: 'duplicado' });
+	// ...mas com o preço acima ele vira "menor" e não colide.
+	assert.ok(r.editarValorAlerta(lista, 'b', '10', 15).lista);
+});
+
+test('criarNovoAlerta escolhe o lado que não dispara; igual ou sem preço → maior', () => {
+	const lista = Object.freeze([Object.freeze({ id: 'a', valor: 30, tipo: 'menor' })]);
+	const criado = (entrada, preco) => {
+		const { lista: nova } = r.criarNovoAlerta(lista, entrada, preco);
+		return nova.find(alerta => alerta.id !== 'a');
+	};
+	assert.equal(criado('100', 150).tipo, 'menor');
+	assert.equal(criado('100', 50).tipo, 'maior');
+	assert.equal(criado('100', 100).tipo, 'maior');
+	for (const semPreco of [NaN, undefined, null, Infinity]) {
+		assert.equal(criado('100', semPreco).tipo, 'maior', String(semPreco));
+	}
+	assert.equal(r.criarNovoAlerta(lista, '100').lista.find(a => a.id !== 'a').tipo, 'maior');
+	// O alerta novo nunca dispara com o mesmo preço (exceto no empate).
+	for (const preco of [50, 150]) {
+		assert.equal(r.deveDisparar(criado('100', preco), preco), false, String(preco));
+	}
+	// Valor arredondado, id novo, lista ordenada (maior valor primeiro) e a original intacta.
+	const { lista: nova } = r.criarNovoAlerta(lista, ' 1.239 ', 500);
+	assert.deepEqual(nova.map(a => [a.valor, a.tipo]), [[30, 'menor'], [1.24, 'menor']]);
+	assert.ok(nova[1].id.length > 0 && nova[1].id !== 'a');
+	assert.equal(lista.length, 1);
+});
+
+test('criarNovoAlerta recusa inválido, duplicado (pelo tipo calculado) e passar do limite', () => {
+	const lista = [{ id: 'a', valor: 400, tipo: 'menor' }, { id: 'b', valor: 300, tipo: 'maior' }];
+	for (const invalido of ['', '  ', 'abc', '0', '-1']) {
+		assert.deepEqual(r.criarNovoAlerta(lista, invalido, 500), { erro: 'invalido' }, invalido);
+	}
+	// Preço acima: o novo seria "menor", igual ao "a" → recusado.
+	assert.deepEqual(r.criarNovoAlerta(lista, '400', 500), { erro: 'duplicado' });
+	// Controle: preço abaixo, o novo seria "maior" e não colide com o "menor" de mesmo valor.
+	assert.ok(r.criarNovoAlerta(lista, '400', 350).lista);
+	// "b" é "maior" com 300: com o preço acima o novo vira "menor" e é aceito; sem preço, colide.
+	assert.ok(r.criarNovoAlerta(lista, '300', 500).lista);
+	assert.deepEqual(r.criarNovoAlerta(lista, '300'), { erro: 'duplicado' });
+
+	const cheia = Array.from({ length: r.MAX_ALERTAS }, (_, i) => ({ id: `x${i}`, valor: 1000 + i, tipo: 'maior' }));
+	assert.deepEqual(r.criarNovoAlerta(cheia, '5', 500), { erro: 'limite' });
 });
 
 test('ciclo de tipos e duplicidade', () => {

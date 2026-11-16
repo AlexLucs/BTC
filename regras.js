@@ -80,9 +80,24 @@ function deveDisparar(alerta, preco) {
 	return false; // desativado
 }
 
-/** Primeiro alerta (na ordem da lista) que deve disparar com o preço atual. */
-function alertaParaDisparar(alertas, preco) {
-	return alertas.find(alerta => deveDisparar(alerta, preco)) ?? null;
+/**
+ * Primeiro alerta (na ordem da lista) que deve disparar com o preço atual.
+ * "ignorar": ids de alertas que já dispararam e esperam o OK (alarmes pendentes, mesmo
+ * fora da tela); eles não disparam de novo, mas não impedem os outros.
+ */
+function alertaParaDisparar(alertas, preco, ignorar = new Set()) {
+	return alertas.find(alerta => !ignorar.has(alerta.id) && deveDisparar(alerta, preco)) ?? null;
+}
+
+/**
+ * Instante em que um alarme na tela sai dela por falta de movimento: "espera" ms depois
+ * do mais recente entre o fim dos toques e o último movimento do usuário.
+ * @returns {number} NaN enquanto os toques não terminaram (ou se o alarme nunca sai).
+ */
+function instanteDeOcultar(fimDosToques, ultimoMovimento, espera) {
+	if (!Number.isFinite(fimDosToques)) return NaN;
+	const referencia = Number.isFinite(ultimoMovimento) ? Math.max(fimDosToques, ultimoMovimento) : fimDosToques;
+	return referencia + espera;
 }
 
 /**
@@ -99,9 +114,9 @@ function desativarAposDisparo(alertas, id) {
 }
 
 /**
- * Tipo de um alerta desativado que volta a valer: o lado que não dispara com o
- * preço atual (preço acima do valor → "menor"; abaixo → "maior"). Preço igual ao
- * valor (os dois disparariam) ou desconhecido (NaN) → "maior".
+ * Tipo de um alerta desativado que volta a valer (ou de um alerta novo): o lado que não
+ * dispara com o preço atual (preço acima do valor → "menor"; abaixo → "maior"). Preço
+ * igual ao valor (os dois disparariam) ou desconhecido (NaN) → "maior".
  */
 function tipoAoReativar(valor, preco) {
 	return Number.isFinite(preco) && preco > valor ? TIPO.MENOR : TIPO.MAIOR;
@@ -127,6 +142,20 @@ function editarValorAlerta(alertas, id, entrada, preco = NaN) {
 	const tipo = alvo.tipo === TIPO.DESATIVADO ? tipoAoReativar(valor, preco) : alvo.tipo;
 	if (existeDuplicado(alertas, valor, tipo, id)) return { erro: 'duplicado' };
 	return { lista: ordenarAlertas(alertas.map(a => (a.id === id ? { ...a, valor, tipo } : a))) };
+}
+
+/**
+ * Cria um alerta (formulário da tela de alertas). O tipo é o lado que não dispara com o
+ * preço atual (tipoAoReativar), a mesma regra da reativação e da edição; sem preço, "maior".
+ * @returns {{lista: Array}|{erro: 'invalido'|'duplicado'|'limite'}}
+ */
+function criarNovoAlerta(alertas, entrada, preco = NaN) {
+	const valor = converterValor(entrada);
+	if (valor === null) return { erro: 'invalido' };
+	const tipo = tipoAoReativar(valor, preco);
+	if (existeDuplicado(alertas, valor, tipo)) return { erro: 'duplicado' };
+	if (alertas.length >= MAX_ALERTAS) return { erro: 'limite' };
+	return { lista: ordenarAlertas([...alertas, { id: novoId(), valor, tipo }]) };
 }
 
 /** Há algum alerta que ainda pode disparar (maior ou menor)? */
@@ -255,7 +284,8 @@ if (typeof module !== 'undefined' && module.exports) {
 	module.exports = {
 		TIPO, PROXIMO_TIPO, MAX_ALERTAS,
 		converterValor, normalizarAlerta, normalizarLista, ordenarAlertas,
-		existeDuplicado, deveDisparar, alertaParaDisparar, desativarAposDisparo, editarValorAlerta,
+		existeDuplicado, deveDisparar, alertaParaDisparar, instanteDeOcultar, desativarAposDisparo, editarValorAlerta,
+		criarNovoAlerta,
 		tipoAoReativar, proximoTipo,
 		direcaoPreco, existeAlertaAtivo, validarEstadoSalvo, VERSAO_ESTADO,
 		variacaoPercentual, fontesNecessarias, intervaloComRecuo, variouAlemDoLimiar, intervaloPorAtividade,
