@@ -11,11 +11,12 @@
           por http://127.0.0.1:42001 (servidor_local.py).
         - 'self' em connect-src: o 1º preço buscado pelo Python vem do servidor local
           (http://127.0.0.1:42001/preco-inicial, ver servidor_local.py).
+        - Nenhum script do TradingView: o gráfico é só um iframe (frame-src).
         Ao trocar de API ou de widget, atualize connect-src / script-src / frame-src.
     -->
     <meta http-equiv="Content-Security-Policy" content="
         default-src 'none';
-        script-src 'self' file: 'unsafe-eval' https://s3.tradingview.com;
+        script-src 'self' file: 'unsafe-eval';
         style-src 'self' file: 'unsafe-inline';
         font-src 'self' file:;
         img-src 'self' file: data:;
@@ -71,16 +72,21 @@
             <button type="button" class="btns" id="compacto-btn" title="Modo compacto" aria-label="Modo compacto">⊟</button>
         </div>
 
-        <!-- Gráfico de candles BTC/BRL (widget externo do TradingView).
+        <!-- Gráfico de candles BTC/BRL (widget do TradingView, só como iframe).
              O widget fica no <template> e só é montado em #grafico enquanto está visível
-             e o monitoramento está ativo (script.js: atualizarGrafico).
+             e o monitoramento está ativo (script.js: atualizarGrafico). Nenhum script do
+             TradingView roda nesta página (ele teria acesso à ponte com o Python): o
+             script.js monta o endereço do iframe com as opções do bloco JSON abaixo
+             (URL_GRAFICO + opções codificadas), o mesmo iframe que o script de embutir criava.
              O atributo "hidden" define o padrão ao abrir: com ele, o gráfico começa oculto
              (nada do TradingView é carregado até o clique em ⇄); sem ele, começa visível. -->
         <div id="grafico" class="grafico" title="Gráfico" hidden></div>
         <template id="grafico-modelo">
             <div class="tradingview-widget-container">
-                <div class="tradingview-widget-container__widget"></div>
-                <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-symbol-overview.js" async>
+                <iframe class="tradingview-widget-container__widget" title="Gráfico de candles BTC/BRL (TradingView)"
+                    sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"></iframe>
+                <!-- Opções do widget (não é executado: só dados, lidos pelo script.js). -->
+                <script type="application/json" class="grafico-opcoes">
                 {
                     "lineWidth": 2,
                     "lineType": 0,
@@ -137,8 +143,10 @@
             <div class="modal-content">
                 <p>ALERTAS</p>
                 <form id="inputForm">
-                    <input type="number" id="valorAlerta" name="valor" min="0.01" step="0.01"
-                        title="Valor em reais a ser monitorado." placeholder="Digite o valor em Reais" required>
+                    <!-- Texto, não "number": o valor é lido no formato brasileiro ("500.000,00"),
+                         como a tela o mostra (regras.js: converterValor). -->
+                    <input type="text" inputmode="decimal" autocomplete="off" id="valorAlerta" name="valor"
+                        title="Valor em reais a ser monitorado (ex.: 500.000,00)." placeholder="Digite o valor em Reais" required>
                     <!-- Só a lista rola: campo e botões ficam sempre visíveis -->
                     <div id="listaAlertas">
                         <table id="alertasTabela">

@@ -254,7 +254,10 @@ input {
     margin-bottom: 20px;
 }
 
-input[type="number"] {
+/* Campo do valor (novo alerta e edição na tabela): texto no formato brasileiro, não
+   "number" (ver converterValor em regras.js). */
+#valorAlerta,
+.campoEdicaoValor {
     display: block;
     margin: 0 auto 20px;
     height: 40px;
@@ -265,14 +268,6 @@ input[type="number"] {
     color: var(--laranja);
     background-color: var(--fundo);
     border: var(--borda);
-    appearance: textfield;
-}
-
-/* Oculta as setas do campo numérico (WebKit/Chromium) */
-input[type="number"]::-webkit-outer-spin-button,
-input[type="number"]::-webkit-inner-spin-button {
-    -webkit-appearance: none;
-    margin: 0;
 }
 
 /* A tela de alertas nunca passa da janela: só a lista rola. O .modal continua
@@ -353,11 +348,16 @@ input[type="number"]::-webkit-inner-spin-button {
     background-color: var(--fundo);
 }
 
-/* "autosize" do widget: ele ocupa 100% do elemento pai, que precisa de altura definida. */
+/* "autosize" do widget: o iframe ocupa 100% do quadro, que tem altura definida. */
 #grafico .tradingview-widget-container,
 #grafico .tradingview-widget-container__widget {
     width: 100%;
     height: 100%;
+}
+
+#grafico iframe {
+    display: block;
+    border: 0;
 }
 
 /* ---------------------------------------------------------------------------
@@ -580,10 +580,19 @@ html.compacto .modal-content p {
     margin-bottom: 8px;
 }
 
-html.compacto input[type="number"] {
+html.compacto #valorAlerta {
     margin-bottom: 8px;
 }
 
 html.compacto #botoesAlerta {
     margin-top: 8px;
+}
+
+/* ---------------------------------------------------------------------------
+   Camada fundo (classe "fundo" no <html>; script.js: aplicarCamada). A janela fica
+   fora da barra de tarefas: minimizada, não haveria como restaurá-la.
+   --------------------------------------------------------------------------- */
+/* O script.js exibe os botões com style.display; só !important vence o estilo inline. */
+html.fundo #minimize-btn {
+    display: none !important;
 }

@@ -32,12 +32,25 @@ function novoId() {
 
 /**
  * Converte o valor digitado (ou salvo) em número positivo com 2 casas.
+ *
+ * Texto no formato brasileiro, como a tela mostra os valores: vírgula decimal e ponto de
+ * milhar ("500.000,50", "500000,5", "R$ 500.000"). Sem vírgula, pontos em grupos de 3
+ * dígitos são de milhar ("500.000" = 500 mil, não 500); qualquer outro ponto é decimal
+ * ("500000.50"), como o valor que a tela de edição recebia antes.
  * @returns {number|null} null se o valor for inválido.
  */
 function converterValor(entrada) {
-	const numero = typeof entrada === 'number' ? entrada : Number(String(entrada ?? '').trim());
+	const numero = typeof entrada === 'number' ? entrada : Number(normalizarTextoDoValor(entrada));
 	if (!Number.isFinite(numero) || numero <= 0) return null;
 	return Math.round(numero * 100) / 100;
+}
+
+/** Texto do valor no formato que Number() entende (ver converterValor). */
+function normalizarTextoDoValor(entrada) {
+	const texto = String(entrada ?? '').replace(/R\$|\s/g, ''); // \s inclui o espaço do Intl (U+00A0)
+	if (texto.includes(',')) return texto.replace(/\./g, '').replace(',', '.');
+	if (/^\d{1,3}(\.\d{3})+$/.test(texto)) return texto.replace(/\./g, '');
+	return texto;
 }
 
 /**

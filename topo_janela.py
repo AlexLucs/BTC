@@ -45,6 +45,8 @@ if sys.platform == "win32":
         wintypes.UINT,
     ]
     _user32.SetWindowPos.restype = wintypes.BOOL
+    _user32.IsIconic.argtypes = [wintypes.HWND]
+    _user32.IsIconic.restype = wintypes.BOOL
 
     # GetWindowLongPtrW só existe no Windows 64 bits; no 32 bits o equivalente é GetWindowLongW.
     _get_window_long = getattr(_user32, "GetWindowLongPtrW", None) or _user32.GetWindowLongW
@@ -107,3 +109,9 @@ def definir_topo(hwnd: int, fixar: bool) -> bool:
     if not sucesso:
         raise ctypes.WinError(ctypes.get_last_error())
     return esta_no_topo(hwnd)
+
+
+def esta_minimizada(hwnd: int) -> bool:
+    """Minimizada, a janela fica em (-32000, -32000): essa posição nunca deve ser gravada."""
+    _exigir_windows()
+    return bool(_user32.IsIconic(hwnd))

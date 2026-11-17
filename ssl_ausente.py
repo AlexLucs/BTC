@@ -22,9 +22,7 @@ import types
 
 
 class ModuloSslAusente(types.ModuleType):
-    """Módulo ssl vazio: importável, sem nenhum atributo do ssl de verdade."""
-
-    substituto_do_btc_status = True
+    """Módulo ssl vazio: importável, sem nenhum atributo do ssl de verdade (ver e_substituto)."""
 
     def __getattr__(self, nome: str):
         raise AttributeError(

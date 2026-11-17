@@ -25,7 +25,8 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable, Protocol
+from collections.abc import Callable
+from typing import Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -60,9 +61,6 @@ class Retangulo:
             and outro.direita <= self.direita
             and outro.base <= self.base
         )
-
-    def contem_ponto(self, x: int, y: int) -> bool:
-        return self.esquerda <= x < self.direita and self.topo <= y < self.base
 
 
 # ---------------------------------------------------------------------------

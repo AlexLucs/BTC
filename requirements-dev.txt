@@ -3,4 +3,4 @@
 -r requirements.txt
 pyinstaller>=6.22,<7   # build: pyinstaller "BTC Monitor.spec"
 pytest>=9,<10          # testes: python -m pytest tests
-playwright>=1.48,<2    # desempenho da página: python -m pytest tests/desempenho -m desempenho
+playwright>=1.48,<2    # testes da página (funcionais, banda) e desempenho (tests/desempenho -m desempenho)

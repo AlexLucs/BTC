@@ -27,6 +27,10 @@ const STREAM_USDT = `${SIMBOLO_USDT.toLowerCase()}@miniTicker`;
 const URL_WS_BASE = 'wss://stream.binance.com:9443/stream?streams=';
 const URL_USD_BRL = 'https://economia.awesomeapi.com.br/json/last/USD-BRL';
 const URL_TAXAS = 'https://mempool.space/api/v1/fees/precise';
+// Gráfico: o iframe do widget "symbol-overview" do TradingView, com as opções (bloco
+// .grafico-opcoes do index.html) codificadas depois do "#". Nenhum script do TradingView
+// roda na página: ele teria acesso à ponte com o Python (window.pywebview.api).
+const URL_GRAFICO = 'https://s.tradingview.com/embed-widget/symbol-overview/?locale=br#';
 
 const CHAVE_ALERTAS = 'alertasjson';
 const CHAVE_ESTADO = 'ultimoEstado';     // último estado exibido (ver "Último estado salvo")
@@ -62,6 +66,8 @@ const WS_RECONEXAO_MIN = 1000;     // espera da 1ª reconexão; dobra a cada ten
 const WS_RECONEXAO_MAX = 60000;
 const TIMEOUT_REQUISICAO = 8000;
 const TIMEOUT_API_PYTHON = 5000;
+const ESPERA_REPETIR_ESTADO_JANELA = 10000; // espera longa do estado da janela falhou: tenta de novo
+const ESPERA_AVISO_ATALHO = 15000;          // aviso de atalho global em uso fecha sozinho
 const ATRASO_CHECAGEM_ALARMES = 1000;
 const SILENCIO_PADRAO = 15000;
 const SILENCIO_APOS_CARREGAR = 5000;
@@ -97,6 +103,8 @@ const CICLOS_ANTES_SEM_DADOS = 3;
 const formatoBRL = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
 const formatoUSD = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'USD' });
 const formatoTaxa = new Intl.NumberFormat('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+// Valor do alerta no campo de edição: "500.000,5" (sem "R$"), lido de volta por converterValor.
+const formatoEdicao = new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 2 });
 const formatoData = new Intl.DateTimeFormat('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit' });
 const formatoHora = new Intl.DateTimeFormat('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 
@@ -173,15 +181,26 @@ let graficoVisivel = false;       // escolha do usuário pelo botão ⇄ (padrã
 let graficoLiberado = false;      // a abertura já passou do ponto em que o gráfico pode ser montado (aposCarregarPagina)
 let compacto = false;             // modo compacto: classe "compacto" no <html> (no app, vem do servidor local na abertura)
 let filaCompacto = Promise.resolve(); // pedidos de redimensionamento ao Python, na ordem dos cliques
-let fixado = false;
-let monitorarInatividade = true;  // desligado enquanto a janela está fixada no topo
+// Camada da janela no app: 'normal', 'topo' (fixada acima das outras) ou 'fundo' (atrás das
+// outras e fora da barra de tarefas; camada_fundo.py). O Python decide e devolve a real.
+let camada = 'normal';
+let camadaPedida = 'normal';          // a do último clique (vários cliques seguidos seguem dela)
+let filaCamada = Promise.resolve();   // pedidos ao Python, na ordem dos cliques
+let pedidosCamada = 0;                // pedidos na fila ainda sem resposta
+let monitorarInatividade = true;  // só na camada normal (fixada ou no fundo, o app fica à vista)
+// Estado da janela na camada fundo, calculado pelo Python (camada_fundo.py):
+// - coberta por outras janelas: conta como oculta (liga só o que liga minimizada);
+// - usuário ausente (sem tecla nem mouse em lugar nenhum há ~17 min): pausa como na
+//   inatividade, e a 1ª tecla ou movimento em qualquer janela retoma.
+let janelaCoberta = false;
+let usuarioAusente = false;
+// Na camada fundo, com alarme na tela a janela fica acima de todas (destacar_alarme).
+let destaquePedido = false;
+let filaDestaque = Promise.resolve();
 let ultimaInteracao = Date.now();
 // Um alarme disparou e ainda não houve atividade depois dele: a inatividade não pausa até o
 // usuário voltar (e só conta os ~17 min a partir dessa atividade).
 let alarmeSemAtividade = false;
-
-let wakeLock = null;
-let pedindoWakeLock = false;
 
 const timers = { preco: 0, taxas: 0, dolar: 0, alarmes: 0, silencio: 0, ocultarAlarme: 0, wsVigia: 0, wsSonda: 0, wsReconexao: 0 };
 
@@ -265,6 +284,16 @@ function paraNumero(valor, campo) {
 }
 
 /**
+ * Preço do par: além de número, positivo. Um "0.00000000" (par suspenso, resposta degradada)
+ * dispararia todos os alertas "menor"; conta como falha da fonte, como um campo inválido.
+ */
+function paraPreco(valor, campo) {
+	const preco = paraNumero(valor, campo);
+	if (preco <= 0) throw new Error(`Campo "${campo}" sem preço positivo: ${valor}`);
+	return preco;
+}
+
+/**
  * Variação percentual de 24 h pela abertura, a mesma conta no REST e no WebSocket (o
  * miniTicker não traz o percentual pronto). Sem abertura válida, vale o percentual que
  * a Binance mandou, se houver.
@@ -277,7 +306,7 @@ function lerVariacao(preco, abertura, campoAbertura, percentualPronto) {
 }
 
 function lerTicker(dados) {
-	const preco = paraNumero(dados.lastPrice, 'lastPrice');
+	const preco = paraPreco(dados.lastPrice, 'lastPrice');
 	return {
 		preco,
 		variacao: lerVariacao(preco, dados.openPrice, 'openPrice', dados.priceChangePercent),
@@ -288,7 +317,7 @@ function lerTicker(dados) {
 
 /** Lê o ticker de uma mensagem do WebSocket (campos c, o, h, l do miniTicker da Binance). */
 function lerTickerWs(dados) {
-	const preco = paraNumero(dados.c, 'c');
+	const preco = paraPreco(dados.c, 'c');
 	return {
 		preco,
 		variacao: lerVariacao(preco, dados.o, 'o', dados.P),
@@ -341,7 +370,6 @@ function agendar(nome, funcao, minimo, variacao, geracao) {
 function iniciarCiclos() {
 	ativo = true;
 	controleCiclo = new AbortController();
-	adquirirWakeLock();
 	ajustarFontes();
 }
 
@@ -351,7 +379,6 @@ function pararCiclos() {
 	desligarPrecos();
 	desligarFonte('taxas');
 	desligarFonte('dolar');
-	liberarWakeLock();
 }
 
 // ---------------------------------------------------------------------------
@@ -370,11 +397,12 @@ function pararCiclos() {
 /**
  * A página conta como visível? No navegador, sempre: a aba em segundo plano mostra o preço
  * no título. No app (o título da janela é fixo), vale a visibilidade real, mas só depois do
- * 1º preço: a abertura nunca espera por ela.
+ * 1º preço: a abertura nunca espera por ela. Coberta por outras janelas (camada fundo, avisado
+ * pelo Python) conta como oculta: o Chromium só vê "hidden" com a janela minimizada.
  */
 function paginaVisivel() {
 	if (!isPyWebView || !carregado) return true;
-	return document.visibilityState === 'visible';
+	return document.visibilityState === 'visible' && !janelaCoberta;
 }
 
 function necessidades() {
@@ -1132,8 +1160,17 @@ function atualizarGrafico() {
 		const inicio = performance.now();
 		Metricas.contar('grafico:montagens');
 		observarCargaGrafico(inicio);
-		Metricas.medir('grafico:montar', () => ui.grafico.append(document.importNode(ui.graficoModelo.content, true)));
+		Metricas.medir('grafico:montar', () => ui.grafico.append(criarGrafico()));
 	}
+}
+
+/** Clona o <template> do gráfico e aponta o iframe para o widget com as opções do bloco JSON. */
+function criarGrafico() {
+	const quadro = document.importNode(ui.graficoModelo.content, true);
+	const opcoes = JSON.parse(quadro.querySelector('.grafico-opcoes').textContent);
+	// O src entra antes de o iframe ir para a página: uma carga só.
+	quadro.querySelector('iframe').src = URL_GRAFICO + encodeURIComponent(JSON.stringify(opcoes));
+	return quadro;
 }
 
 let observadorGrafico = null;
@@ -1318,42 +1355,18 @@ function aoMoverMouse(evento) {
 }
 
 function verificarInatividade() {
-	if (!ativo || !monitorarInatividade) return;
+	if (!ativo) return;
 	// Com algum alerta ativo, nunca pausa: é com o usuário longe que o alerta mais importa.
 	if (existeAlertaAtivo(alertas)) return;
 	// Depois de um alarme, só volta a contar a partir da próxima atividade do usuário.
 	if (alarmeSemAtividade) return;
-	if (Date.now() - ultimaInteracao >= LIMITE_INATIVIDADE) pausar(false);
-}
-
-// ---------------------------------------------------------------------------
-// WakeLock (impede o desligamento da tela enquanto monitora)
-// ---------------------------------------------------------------------------
-
-async function adquirirWakeLock() {
-	if (!('wakeLock' in navigator) || wakeLock || pedindoWakeLock || document.visibilityState !== 'visible') return;
-	pedindoWakeLock = true;
-	try {
-		const sentinela = await navigator.wakeLock.request('screen');
-		if (!ativo) {
-			sentinela.release().catch(() => {});
-			return;
-		}
-		wakeLock = sentinela;
-		sentinela.addEventListener('release', () => {
-			if (wakeLock === sentinela) wakeLock = null;
-		});
-	} catch (erro) {
-		console.warn('WakeLock não disponível:', erro);
-	} finally {
-		pedindoWakeLock = false;
+	// No fundo quase ninguém mexe na janela: vale o ócio do sistema, avisado pelo Python.
+	if (camada === 'fundo') {
+		if (usuarioAusente) pausar(false);
+		return;
 	}
-}
-
-function liberarWakeLock() {
-	const sentinela = wakeLock;
-	wakeLock = null;
-	if (sentinela) sentinela.release().catch(erro => console.warn('Erro ao liberar WakeLock:', erro));
+	if (!monitorarInatividade) return;
+	if (Date.now() - ultimaInteracao >= LIMITE_INATIVIDADE) pausar(false);
 }
 
 // ---------------------------------------------------------------------------
@@ -1412,29 +1425,116 @@ async function chamarApi(metodo, ...argumentos) {
 async function reiniciar() {
 	gravarEstado(true);
 	await enviarMetricas('recarga');
-	if (fixado) await chamarApi('definir_topo', false);
+	// Fixada, desafixa (como sempre); no fundo, continua no fundo (a janela não muda).
+	if (camada === 'topo') await chamarApi('definir_camada', 'normal');
 	location.reload();
 }
 
-async function alternarFixar() {
-	const estado = await chamarApi('definir_topo', !fixado);
-	if (typeof estado === 'boolean') aplicarEstadoFixado(estado);
+// Botão da camada: o ícone mostra a camada atual; a dica, o que o clique faz.
+const PROXIMA_CAMADA = { normal: 'topo', topo: 'fundo', fundo: 'normal' };
+const BOTAO_CAMADA = {
+	normal: { icone: '△', rotulo: 'Fixar no topo' },
+	topo: { icone: '▲', rotulo: 'Fixada no topo: enviar para o fundo' },
+	fundo: { icone: '▼', rotulo: 'No fundo: voltar ao normal' },
+};
+
+/** normal → topo → fundo → normal. Em fila: cada chamada roda numa thread do Python. */
+function alternarCamada() {
+	camadaPedida = PROXIMA_CAMADA[camadaPedida];
+	const pedido = camadaPedida;
+	pedidosCamada++;
+	filaCamada = filaCamada
+		.then(() => chamarApi('definir_camada', pedido)) // chamarApi nunca rejeita
+		.then(resultado => {
+			pedidosCamada--;
+			if (resultado !== pedido) console.warn('A janela não foi para a camada', pedido, '- ficou em', resultado);
+			// Falha na chamada (undefined): a janela continua na camada que estava.
+			aplicarCamada(Object.hasOwn(BOTAO_CAMADA, resultado) ? resultado : camada);
+		});
 }
 
-async function sincronizarEstadoTopo() {
-	const estado = await chamarApi('esta_no_topo');
-	if (typeof estado === 'boolean') aplicarEstadoFixado(estado);
+async function sincronizarCamada() {
+	aplicarCamada(await chamarApi('camada_atual'));
 }
 
-function aplicarEstadoFixado(estado) {
-	fixado = estado;
-	monitorarInatividade = !estado;
+/**
+ * Estado da janela publicado pelo Python (coberta ou não), por espera longa: o Python só
+ * responde quando ele muda (ou a cada ~25 s), e cada resposta já pede a próxima. Repetir a
+ * partir da resposta, nunca de dentro de um timer encadeado (armadilha 19).
+ */
+async function vigiarEstadoJanela(versao = -1) {
+	const estado = await chamarApi('aguardar_estado_janela', versao);
+	if (!estado || !Number.isInteger(estado.versao)) {
+		setTimeout(() => vigiarEstadoJanela(versao), ESPERA_REPETIR_ESTADO_JANELA);
+		return;
+	}
+	aplicarEstadoJanela({ coberta: estado.coberto === true, ausente: estado.ausente === true });
+	vigiarEstadoJanela(estado.versao);
+}
+
+/**
+ * Atalho global (Python, atalho_global.py): se uma combinação estava em uso por outro
+ * programa, avisa qual ficou valendo (ou que ficou sem atalho). O Python só responde
+ * na 1ª chamada da execução: o ↻ não repete o aviso.
+ */
+async function avisarAtalho() {
+	const situacao = await chamarApi('aviso_do_atalho');
+	if (!situacao || typeof situacao !== 'object' || !Array.isArray(situacao.em_uso)) return;
+	const emUso = situacao.em_uso.filter(nome => typeof nome === 'string');
+	if (emUso.length === 0) return;
+	const lista = emUso.join(' e ');
+	const verbo = emUso.length > 1 ? 'estão' : 'está';
+	const mensagem = typeof situacao.ativo === 'string'
+		? `${lista} já ${verbo} em uso por outro programa. Para trazer ou esconder o BTC Status, use ${situacao.ativo}.`
+		: `${lista} já ${verbo} em uso por outros programas. O BTC Status ficou sem atalho global nesta execução.`;
+	aviso('ATALHO', mensagem, ESPERA_AVISO_ATALHO);
+}
+
+function aplicarEstadoJanela({ coberta, ausente }) {
+	if (coberta !== janelaCoberta) {
+		janelaCoberta = coberta;
+		Metricas.evento('cobertura', { coberta });
+		if (coberta) gravarEstado(true); // como ao ocultar
+		ajustarFontes();
+	}
+	if (ausente !== usuarioAusente) {
+		usuarioAusente = ausente;
+		Metricas.evento('ausencia', { ausente });
+		// Voltou (tecla ou mouse em qualquer janela): desfaz só a pausa por inatividade.
+		if (ausente) verificarInatividade();
+		else if (!ativo && !pausaManual) retomar({ silenciar: false });
+	}
+}
+
+/**
+ * Na camada fundo, a janela fica acima de todas enquanto houver alarme na tela ou na fila
+ * (sem roubar o foco); sem alarme, volta ao fundo. Pedidos em fila, como os da camada.
+ */
+function atualizarDestaqueDoAlarme() {
+	const desejado = isPyWebView && camada === 'fundo' && existeAlarmeVisivel();
+	if (desejado === destaquePedido) return;
+	destaquePedido = desejado;
+	filaDestaque = filaDestaque.then(() => chamarApi('destacar_alarme', desejado)); // nunca rejeita
+}
+
+function aplicarCamada(nova) {
+	if (!Object.hasOwn(BOTAO_CAMADA, nova)) return; // falha na chamada: mantém o que está
+	const mudou = nova !== camada;
+	camada = nova;
+	// Com cliques ainda na fila, o próximo clique segue do último pedido; senão, da real.
+	if (pedidosCamada === 0) camadaPedida = nova;
+	monitorarInatividade = nova === 'normal';
 	ultimaInteracao = Date.now();
+	document.documentElement.classList.toggle('fundo', nova === 'fundo');
+	if (nova !== 'fundo') destaquePedido = false; // fora do fundo o Python não mantém destaque
+	atualizarDestaqueDoAlarme();
+	const { icone, rotulo } = BOTAO_CAMADA[nova];
 	const botao = el('fixar-btn');
-	const rotulo = estado ? 'Desafixar' : 'Fixar no topo';
-	botao.textContent = estado ? '▽' : '△';
+	botao.textContent = icone;
 	botao.title = rotulo;
 	botao.setAttribute('aria-label', rotulo);
+	if (!mudou) return;
+	Metricas.evento('camada', { camada: nova });
 }
 
 function configurarBotoesJanela() {
@@ -1583,27 +1683,53 @@ function persistirEmDisco(lista) {
 		});
 }
 
-/** Ordena, atualiza a lista em memória e persiste. As listas nunca são alteradas no lugar. */
+/**
+ * No app, o Alertas.json só pode ser gravado depois de lido: gravar antes (lista em memória
+ * ainda vazia) apagaria do disco os alertas salvos. No navegador não há leitura assíncrona.
+ */
+let alertasSincronizados = !isPyWebView;
+let sincronizacaoRepetida = false; // a leitura que falhou é repetida uma vez, quando a ponte existir
+
+/**
+ * Ordena, atualiza a lista em memória e persiste. As listas nunca são alteradas no lugar.
+ * @returns {boolean} false se a lista salva ainda não foi lida (nada muda).
+ */
 function gravarAlertas(lista) {
+	if (!alertasSincronizados) {
+		aviso('AGUARDE', 'Os alertas salvos ainda estão sendo carregados. Tente de novo em instantes.', 5000);
+		return false;
+	}
 	alertas = ordenarAlertas(lista);
 	if (isPyWebView) persistirEmDisco(alertas);
 	else gravarLocal(alertas);
 	ajustarFontes(); // com a janela oculta, é o alerta ativo que mantém os preços ligados
+	return true;
 }
 
-/** No app, o arquivo em disco é a fonte da verdade. */
+/**
+ * No app, o arquivo em disco é a fonte da verdade. Até ele ser lido, nenhuma gravação é
+ * aceita (gravarAlertas): a tela pode aparecer antes (estado salvo), e uma gravação com a
+ * lista ainda vazia apagaria os alertas do disco.
+ */
 async function sincronizarAlertas() {
 	try {
 		const doDisco = await chamarApi('carregar_alerta');
 		if (!Array.isArray(doDisco)) {
 			// null = arquivo ilegível ou corrompido (o Python guarda uma cópia .bak); undefined = falha na chamada.
 			if (doDisco === null) {
+				// O arquivo ruim já foi preservado como .bak: começar com a lista vazia é seguro.
+				alertasSincronizados = true;
 				aviso('FALHA', 'O arquivo de alertas estava corrompido. Uma cópia .bak foi salva em %APPDATA%\\btcstatus.');
+			} else if (!sincronizacaoRepetida) {
+				// Ponte lenta (abertura fria) ou falha passageira: lê de novo quando a ponte existir.
+				sincronizacaoRepetida = true;
+				apiPronta.then(sincronizarAlertas);
 			} else {
-				aviso('FALHA', 'Não foi possível carregar os alertas salvos.');
+				aviso('FALHA', 'Não foi possível carregar os alertas salvos. Feche e abra o app para tentar de novo.');
 			}
 			return;
 		}
+		alertasSincronizados = true;
 		const { alertas: lista, alterado } = normalizarLista(doDisco);
 		alertas = lista;
 		ajustarFontes();
@@ -1655,6 +1781,7 @@ function dispararAlerta(alerta) {
 function mostrarAlarme(id) {
 	const pendente = alarmesPendentes.get(id);
 	pendente.situacao = 'fila';
+	atualizarDestaqueDoAlarme();
 	const { alerta } = pendente;
 	const mensagem = alerta.tipo === TIPO.MAIOR ? 'O Preço do Bitcoin superou' : 'O Preço do Bitcoin caiu abaixo de';
 	mostrarDialogo({
@@ -1719,9 +1846,11 @@ function fecharAlarme(id, ocultado) {
 	if (!pendente) return;
 	if (ocultado) {
 		pendente.situacao = 'oculto';
+		atualizarDestaqueDoAlarme(); // saiu da tela: a janela volta ao fundo
 		return;
 	}
 	alarmesPendentes.delete(id);
+	atualizarDestaqueDoAlarme();
 	const atualizada = desativarAposDisparo(alertas, id);
 	if (atualizada === alertas) return; // o alerta foi apagado enquanto o diálogo estava aberto
 	gravarAlertas(atualizada);
@@ -1795,8 +1924,7 @@ const MENSAGEM_CRIACAO = {
 function criarAlerta() {
 	const resultado = criarNovoAlerta(alertas, ui.campoValor.value, precoParaReativar());
 	if (resultado.lista) {
-		gravarAlertas(resultado.lista);
-		silenciarAlarmes();
+		if (gravarAlertas(resultado.lista)) silenciarAlarmes();
 	} else {
 		aviso('FALHA', MENSAGEM_CRIACAO[resultado.erro], 15000);
 	}
@@ -1826,8 +1954,7 @@ function alternarTipoAlerta(id) {
 		aviso('FALHA', 'Existe um alerta com esse mesmo valor.', 5000);
 		return;
 	}
-	gravarAlertas(alertas.map(a => (a.id === id ? { ...a, tipo: novoTipo } : a)));
-	silenciarAlarmes();
+	if (gravarAlertas(alertas.map(a => (a.id === id ? { ...a, tipo: novoTipo } : a)))) silenciarAlarmes();
 	renderizarTabelaAlertas();
 }
 
@@ -1915,11 +2042,11 @@ function iniciarEdicaoValor(botao, id) {
 	if (!alvo) return;
 
 	const campo = document.createElement('input');
-	campo.type = 'number';
-	campo.min = '0.01';
-	campo.step = '0.01';
+	campo.type = 'text'; // formato brasileiro, como a tela mostra (ver converterValor)
+	campo.inputMode = 'decimal';
+	campo.autocomplete = 'off';
 	campo.className = 'campoEdicaoValor';
-	campo.value = String(alvo.valor);
+	campo.value = formatoEdicao.format(alvo.valor);
 	campo.title = 'Enter confirma; Esc ou clicar fora cancela.';
 	campo.setAttribute('aria-label', 'Novo valor do alerta');
 
@@ -1953,8 +2080,7 @@ function iniciarEdicaoValor(botao, id) {
 function confirmarEdicaoValor(id, entrada) {
 	const resultado = editarValorAlerta(alertas, id, entrada, precoParaReativar());
 	if (resultado.lista) {
-		gravarAlertas(resultado.lista);
-		silenciarAlarmes();
+		if (gravarAlertas(resultado.lista)) silenciarAlarmes();
 	} else if (MENSAGEM_EDICAO[resultado.erro]) {
 		aviso('FALHA', MENSAGEM_EDICAO[resultado.erro], 15000);
 	}
@@ -1978,8 +2104,8 @@ function aoTeclarValorAlerta(evento) {
 function aposCarregarPagina() {
 	audioAlerta ??= new Audio('alerta.mp3');
 	audioAlerta.preload = 'auto';
-	// No app, o gráfico espera também a ponte do Python: o script do TradingView
-	// (tarefa longa de ~60 ms) atrasaria a injeção do pywebview, que vem logo após o "load".
+	// No app, o gráfico espera também a ponte do Python: a carga do iframe do TradingView
+	// disputaria a thread da página com a injeção do pywebview, que vem logo após o "load".
 	const montar = () => quandoOcioso(() => {
 		graficoLiberado = true;
 		atualizarGrafico();
@@ -2005,7 +2131,7 @@ function registrarEventos() {
 		'centralizar-btn': () => chamarApi('centralizar'),
 		'reload-btn': reiniciar,
 		'pausar-btn': pararIniciar,
-		'fixar-btn': alternarFixar,
+		'fixar-btn': alternarCamada,
 		'alerta-btn': alternarTelaAlerta,
 		'minimize-btn': () => chamarApi('minimizar'),
 		'close-btn': fecharJanela,
@@ -2032,7 +2158,6 @@ function registrarEventos() {
 	if (isPyWebView) document.addEventListener('mousedown', aoPressionarParaArrastar, { passive: true });
 	document.addEventListener('visibilitychange', () => {
 		if (document.visibilityState === 'hidden') gravarEstado(true);
-		else if (ativo) adquirirWakeLock();
 		ajustarFontes(); // janela oculta: sem rede, ou só os preços se houver alerta ativo
 	});
 	window.addEventListener('pagehide', () => gravarEstado(true));
@@ -2052,7 +2177,9 @@ document.addEventListener('DOMContentLoaded', () => {
 	registrarEventos();
 	configurarBotoesJanela();
 	restaurarEstadoSalvo(); // antes das requisições: a tela já abre com os últimos valores
-	if (isPyWebView) sincronizarAlertas(); // a tela de carregamento cobre a interface até lá
+	// No app, a tela pode aparecer antes de os alertas serem lidos (estado salvo): até lá,
+	// gravarAlertas recusa mudanças (ver alertasSincronizados).
+	if (isPyWebView) sincronizarAlertas();
 	else carregarAlertasLocais();
 	iniciarCiclos();
 	atualizarBotaoPausa();
@@ -2062,6 +2189,10 @@ document.addEventListener('DOMContentLoaded', () => {
 	if (document.readyState === 'complete') aposCarregarPagina();
 	else window.addEventListener('load', aposCarregarPagina, { once: true });
 	setInterval(verificarInatividade, INTERVALO_VERIFICAR_INATIVIDADE);
-	if (isPyWebView) sincronizarEstadoTopo();
+	if (isPyWebView) {
+		sincronizarCamada();
+		vigiarEstadoJanela();
+		avisarAtalho();
+	}
 	Metricas.marcar('inicializacao_js_concluida');
 });

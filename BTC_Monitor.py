@@ -83,15 +83,19 @@ def _importar_o_resto() -> None:
     ssl_ausente.garantir()  # antes do "import webview"
     import configparser  # noqa: F401, PLC0415
     import contextlib  # noqa: F401, PLC0415
-    import logging  # noqa: F401, PLC0415
+    import logging  # noqa: PLC0415
     import logging.handlers  # noqa: F401, PLC0415
     import pathlib  # noqa: F401, PLC0415
+    import threading  # noqa: F401, PLC0415
 
     import webview  # noqa: F401, PLC0415
 
     import alertas_store  # noqa: F401, PLC0415
     import argumentos_webview2  # noqa: F401, PLC0415
+    import atalho_global  # noqa: F401, PLC0415
     import bordas_janela  # noqa: F401, PLC0415
+    import camada_fundo  # noqa: F401, PLC0415
+    import instancia_unica  # noqa: F401, PLC0415
     import servidor_local  # noqa: F401, PLC0415
     import topo_janela  # noqa: F401, PLC0415
 
@@ -104,6 +108,7 @@ if (__name__ == "__main__" and sys.platform == "win32"
 import configparser  # noqa: E402
 import contextlib  # noqa: E402
 import logging  # noqa: E402
+import threading  # noqa: E402
 from logging.handlers import RotatingFileHandler  # noqa: E402
 from pathlib import Path  # noqa: E402
 
@@ -115,8 +120,18 @@ ssl_ausente.garantir()
 import webview  # noqa: E402
 
 import argumentos_webview2  # noqa: E402
+import instancia_unica  # noqa: E402
 import topo_janela  # noqa: E402
+from atalho_global import OuvinteAtalho, SistemaWin32Atalho  # noqa: E402
 from bordas_janela import Arrastador, area_livre  # noqa: E402
+from camada_fundo import (  # noqa: E402
+    CAMADAS,
+    CAMADAS_LEMBRADAS,
+    ControladorCamada,
+    EstadoPublicado,
+    SistemaWin32Fundo,
+    camada_salva,
+)
 from alertas_store import AlertasInvalidosError, RepositorioAlertas  # noqa: E402
 from servidor_local import PORTA as PORTA_LOCAL  # noqa: E402
 from servidor_local import criar_aplicativo  # noqa: E402
@@ -124,7 +139,7 @@ from servidor_local import criar_aplicativo  # noqa: E402
 # Medição de desempenho: presente no código-fonte e no build com -ComMedicao; o build de
 # produção exclui o módulo metricas (ver "BTC Monitor.spec") e tudo vira operação vazia.
 try:
-    from metricas import MetricasInvalidasError, RegistroMetricas, validar_relatorio_js  # noqa: E402
+    from metricas import MetricasInvalidasError, RegistroMetricas, validar_relatorio_js
 except ImportError:
     RegistroMetricas = None
 MEDICAO_ATIVA = RegistroMetricas is not None
@@ -174,6 +189,12 @@ def deve_buscar_preco_pelo_python() -> bool:
     return not (MEDICAO_ATIVA and os.getenv(VARIAVEL_SEM_PRECO_PYTHON) == "1")
 
 
+# BTC_DEPURAR_FUNDO=1: o log ganha as linhas de depuração da camada fundo (camada_fundo.py)
+# e do atalho global (atalho_global.py).
+VARIAVEL_DEPURAR_FUNDO = "BTC_DEPURAR_FUNDO"
+LOGS_DE_DEPURACAO = ("camada_fundo", "atalho_global")
+
+
 def configurar_log() -> None:
     """Grava o log em arquivo, já que o executável não tem console."""
     PASTA_DADOS.mkdir(parents=True, exist_ok=True)
@@ -189,6 +210,39 @@ def configurar_log() -> None:
         console = logging.StreamHandler()
         console.setFormatter(formato)
         raiz.addHandler(console)
+
+    # Diagnóstico da camada fundo e do atalho (vale também no .exe): decisões e "linha de
+    # vida" da vigia.
+    if os.getenv(VARIAVEL_DEPURAR_FUNDO) == "1":
+        for nome in LOGS_DE_DEPURACAO:
+            logging.getLogger(nome).setLevel(logging.DEBUG)
+
+    registrar_excecoes_soltas()
+
+
+def registrar_excecoes_soltas() -> None:
+    """Exceção não tratada (no processo ou em qualquer thread) vai para o log.
+
+    O .exe não tem console: sem isto, um erro numa thread sem try (ex.: handler de evento
+    do pywebview) sumiria sem rastro. As chamadas da js_api já são registradas pelo próprio
+    pywebview (webview/util.py).
+    """
+
+    def no_processo(tipo, valor, rastro) -> None:
+        if issubclass(tipo, KeyboardInterrupt):
+            sys.__excepthook__(tipo, valor, rastro)
+            return
+        logger.critical("Exceção não tratada", exc_info=(tipo, valor, rastro))
+
+    def na_thread(args: threading.ExceptHookArgs) -> None:
+        if args.exc_type is SystemExit:
+            return
+        nome = args.thread.name if args.thread is not None else "?"
+        logger.error("Exceção não tratada na thread %s", nome,
+                     exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+
+    sys.excepthook = no_processo
+    threading.excepthook = na_thread
 
 
 # ---------------------------------------------------------------------------
@@ -240,24 +294,37 @@ def posicao_dentro_do_monitor(x: int, y: int, largura: int, altura: int, monitor
 
 
 SECAO_POSICAO = "Position"
+# A página pergunta pelo atalho logo após a ponte; ele é registrado no evento shown.
+ESPERA_AVISO_ATALHO_S = 3.0
 SECAO_JANELA = "Janela"
+
+
+# Sem interpolação: um "%" escrito à mão no .ini levantaria InterpolationSyntaxError na
+# leitura de qualquer valor, e o app não abriria.
+def _novo_config() -> configparser.ConfigParser:
+    return configparser.ConfigParser(interpolation=None)
 
 
 def _ler_config() -> configparser.ConfigParser | None:
     if not ARQUIVO_CONFIG.is_file():
         return None
-    config = configparser.ConfigParser()
+    config = _novo_config()
     try:
-        config.read(ARQUIVO_CONFIG, encoding="utf-8")
-    except (configparser.Error, OSError) as erro:
+        # utf-8-sig: aceita o arquivo salvo com BOM por um editor de texto.
+        config.read(ARQUIVO_CONFIG, encoding="utf-8-sig")
+    except (configparser.Error, OSError, UnicodeDecodeError) as erro:
         logger.warning("Configuração da janela ilegível: %s", erro)
         return None
     return config
 
 
-def carregar_posicao(monitores: list) -> tuple[int, int] | None:
+# Valor padrão dos carregar_*: ler o .ini agora. abrir_janela lê uma vez e passa o resultado.
+_LER_AGORA = object()
+
+
+def carregar_posicao(monitores: list, config=_LER_AGORA) -> tuple[int, int] | None:
     """Lê a última posição salva, se ela ainda estiver dentro de algum monitor."""
-    config = _ler_config()
+    config = _ler_config() if config is _LER_AGORA else config
     if config is None:
         return None
     try:
@@ -272,26 +339,63 @@ def carregar_posicao(monitores: list) -> tuple[int, int] | None:
     return x, y
 
 
-def carregar_modo_compacto() -> bool:
-    """Lê o modo da janela salvo; sem arquivo ou com valor inválido, o modo completo."""
+def posicao_salva() -> tuple[int | None, int | None]:
+    """A posição gravada no .ini, sem conferir monitores; (None, None) se não houver."""
     config = _ler_config()
+    try:
+        if config is not None:
+            return config.getint(SECAO_POSICAO, "x"), config.getint(SECAO_POSICAO, "y")
+    except (configparser.Error, ValueError):
+        pass  # sem posição válida: nenhuma é gravada (a próxima abertura centraliza)
+    return None, None
+
+
+def carregar_modo_compacto(config=_LER_AGORA) -> bool:
+    """Lê o modo da janela salvo; sem arquivo ou com valor inválido, o modo completo."""
+    config = _ler_config() if config is _LER_AGORA else config
     if config is None:
         return False
     try:
         return config.getboolean(SECAO_JANELA, "compacto", fallback=False)
-    except ValueError as erro:
+    except (ValueError, configparser.Error) as erro:
         logger.warning("Modo da janela salvo inválido: %s", erro)
         return False
 
 
-def salvar_configuracao(x: int, y: int, compacto: bool) -> None:
-    """Grava posição e modo juntos: o arquivo é sempre reescrito por inteiro."""
-    config = configparser.ConfigParser()
-    config[SECAO_POSICAO] = {"x": str(x), "y": str(y)}
-    config[SECAO_JANELA] = {"compacto": "1" if compacto else "0"}
+def carregar_camada(config=_LER_AGORA) -> str:
+    """Lê a camada da janela salva ("normal" ou "fundo"); sem arquivo ou inválida, "normal".
+
+    A fixação no topo não é lembrada (como antes): "topo" nunca é gravado.
+    """
+    config = _ler_config() if config is _LER_AGORA else config
+    if config is None:
+        return "normal"
+    try:
+        return camada_salva(config.get(SECAO_JANELA, "camada", fallback=None))
+    except configparser.Error as erro:
+        logger.warning("Camada da janela salva inválida: %s", erro)
+        return "normal"
+
+
+def salvar_configuracao(x: int | None, y: int | None, compacto: bool, camada: str = "normal") -> None:
+    """Grava posição, modo e camada juntos: o arquivo é sempre reescrito por inteiro.
+
+    Sem posição (x/y None: janela minimizada ao fechar), a seção [Position] fica de fora e a
+    próxima abertura centraliza, como sem arquivo. Gravação atômica (.tmp + replace): uma
+    queda no meio nunca deixa o .ini pela metade.
+    """
+    config = _novo_config()
+    if x is not None and y is not None:
+        config[SECAO_POSICAO] = {"x": str(x), "y": str(y)}
+    config[SECAO_JANELA] = {
+        "compacto": "1" if compacto else "0",
+        "camada": camada if camada in CAMADAS_LEMBRADAS else "normal",
+    }
     PASTA_DADOS.mkdir(parents=True, exist_ok=True)
-    with open(ARQUIVO_CONFIG, "w", encoding="utf-8") as arquivo:
+    temporario = ARQUIVO_CONFIG.with_name(ARQUIVO_CONFIG.name + ".tmp")
+    with temporario.open("w", encoding="utf-8") as arquivo:
         config.write(arquivo)
+    temporario.replace(ARQUIVO_CONFIG)
 
 
 # ---------------------------------------------------------------------------
@@ -305,13 +409,32 @@ class ExposedApi:
     Por isso a janela e o repositório ficam em atributos com "_", que não são expostos.
     """
 
-    def __init__(self, repositorio: RepositorioAlertas, metricas, compacto: bool = False) -> None:
+    def __init__(self, repositorio: RepositorioAlertas, metricas, compacto: bool = False,
+                 camada: str = "normal") -> None:
         self._janela: webview.Window | None = None
         self._handle: int | None = None
         self._repositorio = repositorio
         self._metricas = metricas
         self._compacto = compacto
         self._arrastador = Arrastador(self._handle_janela)
+        # Camada da janela: "normal", "topo" (topo_janela.py) ou "fundo" (camada_fundo.py).
+        # A salva no .ini ("fundo") é aplicada quando a janela aparece (registrar_camada_inicial);
+        # até lá, camada_atual já a informa à página.
+        self._camada = "normal"
+        self._camada_pendente: str | None = camada if camada == "fundo" else None
+        self._trava_camada = threading.Lock()
+        self._controlador_fundo: ControladorCamada | None = None
+        # Na camada fundo: coberta por outras janelas e usuário ausente (ócio do sistema).
+        # A página lê por espera longa (aguardar_estado_janela): coberta, desliga o que
+        # desliga minimizada; ausente, pausa como na inatividade.
+        self._estado_janela = EstadoPublicado()
+        # Atalho global (atalho_global.py): ligado no shown (registrar_atalho_global),
+        # desligado ao fechar. A página pergunta uma vez se alguma combinação estava em uso.
+        self._criar_sistema_atalho = SistemaWin32Atalho if sys.platform == "win32" else None
+        self._atalho: OuvinteAtalho | None = None
+        self._atalho_tentado = threading.Event()
+        self._aviso_atalho_entregue = False
+        self._trava_atalho = threading.Lock()
 
     def _vincular(self, janela: webview.Window) -> None:
         self._janela = janela
@@ -369,7 +492,7 @@ class ExposedApi:
                 nova = posicao_dentro_do_monitor(x, y, WINDOW_WIDTH, altura, monitor)
                 if nova != (x, y):
                     self._janela.move(*nova)
-        except Exception:  # noqa: BLE001 - a página só precisa saber que falhou
+        except Exception:  # a página só precisa saber que falhou
             logger.exception("Falha ao mudar o modo compacto")
             return False
         return True
@@ -397,13 +520,154 @@ class ExposedApi:
         with self._metricas.medir("iniciar_arraste"):
             return self._arrastador.iniciar()
 
-    def definir_topo(self, fixar: bool) -> bool:
-        """Fixa ou desafixa a janela do app no topo e retorna o estado final.
+    def definir_camada(self, camada: str) -> str:
+        """Leva a janela à camada pedida e retorna a camada real.
 
-        Não usa window.on_top do pywebview: ver o motivo em topo_janela.py.
+        "normal": janela comum; "topo": fixada acima das outras (topo_janela.py, nunca
+        window.on_top); "fundo": atrás das outras e fora da barra de tarefas, sobe ao ser
+        clicada e volta ao fundo quando outra janela ganha o foco (camada_fundo.py).
+        Sai sempre da camada anterior antes de entrar na nova. Valor desconhecido: nada muda.
         """
-        with self._metricas.medir("definir_topo"):
-            return self._definir_topo(fixar)
+        with self._metricas.medir("definir_camada"):
+            if camada not in CAMADAS:
+                logger.warning("Camada da janela inválida: %r", camada)
+                return self._camada
+            with self._trava_camada:
+                self._camada_pendente = None
+                return self._definir_camada(camada)
+
+    def camada_atual(self) -> str:
+        """Camada da janela (a salva, enquanto ainda não foi aplicada na abertura)."""
+        # Com a trava: a correção de "topo" para "normal" não pode cruzar com uma troca de
+        # camada em andamento (definir_camada roda noutra thread da js_api).
+        with self._metricas.medir("camada_atual"), self._trava_camada:
+            pendente = self._camada_pendente
+            if pendente is not None:
+                return pendente
+            if self._camada == "topo" and not self._esta_no_topo():
+                self._camada = "normal"  # alguém tirou a fixação por fora
+            return self._camada
+
+    def destacar_alarme(self, ativo: bool) -> bool:
+        """Na camada fundo: com alarme na tela, a janela fica acima de todas (sem ativar).
+
+        Fora do fundo não faz nada (na normal e no topo o alarme segue como sempre).
+        Retorna se a janela ficou no estado pedido.
+        """
+        with self._metricas.medir("destacar_alarme"), self._trava_camada:
+            if self._camada != "fundo" or self._controlador_fundo is None:
+                return False
+            return self._controlador_fundo.destacar(bool(ativo))
+
+    def aguardar_estado_janela(self, versao: int) -> dict:
+        """Espera longa: volta quando o estado da janela mudar da `versao` dada (ou em ~25 s).
+
+        Retorna {"versao": int, "coberto": bool, "ausente": bool}; os dois só valem na
+        camada fundo (fora dela, sempre False). Sem medição (o tempo é a própria espera).
+        """
+        if not isinstance(versao, int) or isinstance(versao, bool):
+            versao = -1  # valor inválido: responde na hora com o estado atual
+        return self._estado_janela.aguardar(versao)
+
+    def aviso_do_atalho(self) -> dict | None:
+        """Se alguma combinação do atalho global estava em uso por outro programa.
+
+        Retorna {"ativo": "Ctrl+Shift+Alt+B" ou None, "em_uso": ["Ctrl+Alt+B", ...]}, ou
+        None quando não há o que avisar. Responde só na 1ª chamada da execução (o ↻ não
+        repete o aviso). Espera o registro, feito no evento shown, por até alguns segundos.
+        """
+        with self._metricas.medir("aviso_do_atalho"):
+            self._atalho_tentado.wait(ESPERA_AVISO_ATALHO_S)
+            with self._trava_atalho:
+                if self._aviso_atalho_entregue:
+                    return None
+                self._aviso_atalho_entregue = True
+            atalho = self._atalho
+            if atalho is None or not atalho.recusados:
+                return None
+            return {
+                "ativo": atalho.registrado.nome if atalho.registrado else None,
+                "em_uso": [recusado.nome for recusado in atalho.recusados],
+            }
+
+    def _ligar_atalho(self) -> None:
+        """Registra o atalho global (ver registrar_atalho_global). Só no Windows."""
+        try:
+            if self._criar_sistema_atalho is None or self._atalho is not None:
+                return
+            self._atalho = OuvinteAtalho(
+                self._criar_sistema_atalho(), self._handle_janela, lambda: self._camada,
+            )
+            self._atalho.iniciar()
+        except Exception:  # o app segue sem atalho
+            logger.exception("Falha ao ligar o atalho global")
+        finally:
+            self._atalho_tentado.set()
+
+    def _desligar_atalho(self) -> None:
+        if self._atalho is not None:
+            self._atalho.parar()
+
+    def _definir_camada(self, camada: str) -> str:
+        if camada == self._camada:
+            return self._camada
+        if self._camada == "fundo":
+            self._controlador().sair_do_fundo()
+        elif self._camada == "topo":
+            self._definir_topo(False)
+        self._camada = "normal"
+        if camada == "topo":
+            if self._definir_topo(True):
+                self._camada = "topo"
+        elif camada == "fundo":
+            try:
+                if self._controlador().entrar_no_fundo():
+                    self._camada = "fundo"
+            except Exception:  # a janela continua na camada normal
+                logger.exception("Falha ao enviar a janela para o fundo")
+        return self._camada
+
+    def _controlador(self) -> ControladorCamada:
+        """Controlador da camada fundo, criado no 1º uso (só no Windows)."""
+        if self._controlador_fundo is None:
+            self._controlador_fundo = ControladorCamada(
+                SistemaWin32Fundo(), self._handle_janela, publicar=self._estado_janela.publicar,
+            )
+        return self._controlador_fundo
+
+    def _aplicar_camada_inicial(self) -> None:
+        """Aplica a camada salva no .ini (ver registrar_camada_inicial)."""
+        with self._trava_camada:
+            pendente, self._camada_pendente = self._camada_pendente, None
+            if pendente is not None:
+                self._definir_camada(pendente)
+
+    def _encerrar_camada(self) -> None:
+        """No fechamento: libera a espera longa da página e para a vigia da camada fundo.
+
+        As chamadas da API rodam em threads não-daemon do pywebview: uma espera presa
+        seguraria o fim do processo por até 25 s.
+        """
+        self._estado_janela.encerrar()
+        if self._controlador_fundo is not None:
+            self._controlador_fundo.encerrar()
+
+    def _camada_para_salvar(self) -> str:
+        return self._camada_pendente or self._camada
+
+    def _posicao_para_salvar(self) -> tuple[int | None, int | None]:
+        """Posição a gravar ao fechar. Minimizada (fechada pela barra de tarefas), a janela
+        está em (-32000, -32000): vale a posição que já estava no .ini (ou nenhuma)."""
+        if self._janela is None:
+            return None, None
+        if sys.platform == "win32":
+            handle = self._handle_janela()
+            try:
+                if handle is not None and topo_janela.esta_minimizada(handle):
+                    return posicao_salva()
+            except OSError:
+                logger.exception("Falha ao conferir se a janela está minimizada")
+        return self._janela.x, self._janela.y
 
     def _definir_topo(self, fixar: bool) -> bool:
         handle = self._handle_janela()
@@ -414,10 +678,6 @@ class ExposedApi:
             return topo_janela.definir_topo(handle, bool(fixar))
         except OSError:
             logger.exception("Falha ao alterar a fixação no topo")
-            return self._esta_no_topo()
-
-    def esta_no_topo(self) -> bool:
-        with self._metricas.medir("esta_no_topo"):
             return self._esta_no_topo()
 
     def _esta_no_topo(self) -> bool:
@@ -484,10 +744,40 @@ def registrar_ajuste_de_tamanho(janela: webview.Window, api: ExposedApi) -> None
         try:
             janela.resize(WINDOW_WIDTH, altura_da_janela(api._modo_compacto()))
             METRICAS.marcar("tamanho_ajustado")
-        except Exception:  # noqa: BLE001 - a janela continua utilizável, só um pouco menor
+        except Exception:  # a janela continua utilizável, só um pouco menor
             logger.exception("Falha ao ajustar o tamanho inicial da janela")
 
     janela.events.shown += ajustar
+
+
+def registrar_camada_inicial(janela: webview.Window, api: ExposedApi) -> None:
+    """Leva a janela à camada salva no .ini ("fundo") assim que ela é exibida (evento shown).
+
+    Antes de a página carregar: a página pergunta a camada (camada_atual) só depois da
+    ponte e já recebe a salva, mesmo que o handler ainda não tenha rodado. Handler sem
+    parâmetros e sem retorno (ver registrar_ajuste_de_tamanho).
+    """
+
+    def aplicar() -> None:
+        try:
+            api._aplicar_camada_inicial()
+        except Exception:  # a janela continua utilizável na camada normal
+            logger.exception("Falha ao aplicar a camada inicial da janela")
+
+    janela.events.shown += aplicar
+
+
+def registrar_atalho_global(janela: webview.Window, api: ExposedApi) -> None:
+    """Liga o atalho global quando a janela aparece (o handle dela já existe).
+
+    O registro fica numa thread própria (atalho_global.py); o handler só espera o
+    resultado (alguns ms). Handler sem parâmetros e sem retorno.
+    """
+
+    def ligar() -> None:
+        api._ligar_atalho()  # não levanta: falhas vão ao log
+
+    janela.events.shown += ligar
 
 
 # ---------------------------------------------------------------------------
@@ -591,9 +881,10 @@ def abrir_janela() -> None:
     if not index.is_file():
         logger.error("index.html não encontrado em %s", PASTA_RECURSOS)
         return
-    compacto = carregar_modo_compacto()
+    config = _ler_config()  # uma leitura do .ini para modo, camada e posição
+    compacto = carregar_modo_compacto(config)
     classe_api = ExposedApiComMedicao if MEDICAO_ATIVA else ExposedApi
-    api = classe_api(RepositorioAlertas(PASTA_DADOS), METRICAS, compacto=compacto)
+    api = classe_api(RepositorioAlertas(PASTA_DADOS), METRICAS, compacto=compacto, camada=carregar_camada(config))
 
     aplicativo = criar_aplicativo(
         PASTA_RECURSOS, html_da_pagina, BUSCA_PRIMEIRO_PRECO,
@@ -608,7 +899,7 @@ def abrir_janela() -> None:
     # o marco separa esse custo do create_window.
     altura = altura_da_janela(compacto)
     monitores = webview.screens
-    posicao = carregar_posicao(monitores)
+    posicao = carregar_posicao(monitores, config)
     if posicao is not None:
         monitor = monitor_no_ponto(*posicao, monitores)
         x, y = posicao_dentro_do_monitor(*posicao, WINDOW_WIDTH, altura, monitor)
@@ -636,15 +927,25 @@ def abrir_janela() -> None:
     )
     api._vincular(janela)
     registrar_ajuste_de_tamanho(janela, api)
+    registrar_camada_inicial(janela, api)
+    registrar_atalho_global(janela, api)
     METRICAS.marcar("janela_criada")
     if MEDICAO_ATIVA:
         registrar_eventos_metricas(janela)
 
     def ao_fechar() -> None:
         try:
-            salvar_configuracao(janela.x, janela.y, api._modo_compacto())
-        except Exception:  # noqa: BLE001 - nunca impedir o fechamento da janela
+            salvar_configuracao(*api._posicao_para_salvar(), api._modo_compacto(), api._camada_para_salvar())
+        except Exception:  # nunca impedir o fechamento da janela
             logger.exception("Falha ao salvar a posição e o modo da janela")
+        try:
+            api._encerrar_camada()
+        except Exception:  # nunca impedir o fechamento da janela
+            logger.exception("Falha ao encerrar a camada da janela")
+        try:
+            api._desligar_atalho()
+        except Exception:  # nunca impedir o fechamento da janela
+            logger.exception("Falha ao desligar o atalho global")
 
     janela.events.closing += ao_fechar
     # Antes de o WebView2 ser criado: sem a rede "de fundo" do navegador (ver o módulo).
@@ -652,6 +953,21 @@ def abrir_janela() -> None:
         argumentos_webview2.aplicar()
     METRICAS.marcar("webview_start")
     webview.start(user_agent="pywebview", **opcoes_de_armazenamento())
+
+
+def ja_existe_outra_instancia() -> bool:
+    """True se o BTC Status já estava aberto (a janela dele é trazida para a frente).
+
+    Ver instancia_unica.py. Só no Windows; qualquer falha ao conferir deixa o app abrir.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        sistema = instancia_unica.SistemaWin32Instancia()
+    except Exception:  # nunca impedir o app de abrir
+        logger.exception("Instância única: não foi possível conferir")
+        return False
+    return not instancia_unica.garantir(sistema, WINDOW_TITLE)
 
 
 def main() -> None:
@@ -665,6 +981,10 @@ def main() -> None:
         for erro in INICIO_PARALELO.erros():
             logger.warning("Início em paralelo (.NET e imports): %s", erro)
     METRICAS.marcar("log_configurado")
+    # Depois do log (a decisão vai para ele). A busca do 1º preço já começou: numa 2ª
+    # instância ela se perde, sem efeito.
+    if ja_existe_outra_instancia():
+        return
     try:
         abrir_janela()
     except Exception:
