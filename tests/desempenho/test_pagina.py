@@ -24,15 +24,14 @@ import time
 from datetime import datetime
 
 import pytest
-from apoio_pagina import (  # noqa: F401 - navegador é fixture
-    ACELERACAO,
+from apoio_pagina import (
     INDEX_URL,
     REDE_REAL,
     RedeSimulada,
     esperar_carregamento,
     estabilizar_websocket,
+    fixture_navegador,  # noqa: F401 - registra a fixture "navegador"
     metricas_devtools,
-    navegador,
     nova_pagina,
     sync_api,
 )
