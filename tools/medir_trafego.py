@@ -61,7 +61,7 @@ class Trafego:
     def total(self) -> int:
         return self.enviados + self.recebidos
 
-    def menos(self, outro: "Trafego") -> "Trafego":
+    def menos(self, outro: Trafego) -> Trafego:
         return Trafego(self.conexoes - outro.conexoes, self.enviados - outro.enviados, self.recebidos - outro.recebidos)
 
 

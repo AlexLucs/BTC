@@ -24,7 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from metricas import estatisticas  # noqa: E402
+from metricas import estatisticas
 
 STREAMS = "btcbrl@miniTicker/btcusdt@miniTicker"
 PORTAS = (9443, 443)

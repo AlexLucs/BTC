@@ -29,7 +29,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from exclusoes_build import (  # noqa: E402
+from exclusoes_build import (
     ARQUIVOS_OBRIGATORIOS,
     IMPORTS_NO_TOPO_CONHECIDOS,
     MODULOS_OBRIGATORIOS,

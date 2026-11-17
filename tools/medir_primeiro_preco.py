@@ -26,8 +26,8 @@ from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from baixar_winhttp import baixar  # noqa: E402
-from primeiro_preco import TIMEOUT_S, URL_TICKERS  # noqa: E402
+from baixar_winhttp import baixar
+from primeiro_preco import TIMEOUT_S, URL_TICKERS
 
 SIMBOLOS = quote('["BTCBRL","BTCUSDT"]', safe="")
 CAMINHO = "/api/v3/ticker/24hr?symbols=" + SIMBOLOS

@@ -25,7 +25,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from metricas import NOME_ARQUIVO, estatisticas  # noqa: E402
+from metricas import NOME_ARQUIVO, estatisticas
 
 ARQUIVO_PADRAO = Path(os.getenv("APPDATA") or Path.home()) / "btcstatus" / NOME_ARQUIVO
 
