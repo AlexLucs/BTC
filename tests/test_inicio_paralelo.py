@@ -5,7 +5,6 @@ from __future__ import annotations
 import subprocess
 import sys
 import threading
-import time
 from pathlib import Path
 
 RAIZ = Path(__file__).resolve().parent.parent

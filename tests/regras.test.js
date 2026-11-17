@@ -4,10 +4,25 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const r = require('../regras.js');
 
+test('converterValor entende o formato brasileiro (vírgula decimal, ponto de milhar)', () => {
+	// O ponto em grupos de 3 dígitos é de milhar: "500.000" é 500 mil, não 500 (C2 da revisão).
+	assert.equal(r.converterValor('500.000'), 500000);
+	assert.equal(r.converterValor('1.239'), 1239);
+	assert.equal(r.converterValor('1.500.000'), 1500000);
+	assert.equal(r.converterValor('500.000,50'), 500000.5);
+	assert.equal(r.converterValor('500000,5'), 500000.5);
+	assert.equal(r.converterValor('R$ 500.000,00'), 500000);
+	assert.equal(r.converterValor('R$\u00a0500.000,00'), 500000); // como o Intl formata
+	// Sem vírgula e fora dos grupos de milhar, o ponto é decimal (valor vindo do JS/Python).
+	assert.equal(r.converterValor('500000.50'), 500000.5);
+	assert.equal(r.converterValor('1234.5'), 1234.5);
+	assert.equal(r.converterValor(500000.5), 500000.5);
+});
+
 test('converterValor aceita positivos e arredonda para centavos', () => {
 	assert.equal(r.converterValor('500000'), 500000);
-	assert.equal(r.converterValor(' 1.239 '), 1.24);
-	for (const invalido of ['', '  ', 'abc', '0', '-3', null, undefined, Infinity, NaN]) {
+	assert.equal(r.converterValor(' 1,239 '), 1.24);
+	for (const invalido of ['', '  ', 'abc', '0', '-3', null, undefined, Infinity, NaN, '1.234.5', '1,2,3', '0,00']) {
 		assert.equal(r.converterValor(invalido), null, String(invalido));
 	}
 });
@@ -72,7 +87,7 @@ test('editarValorAlerta muda o valor, reordena e reativa o desativado como maior
 	]);
 
 	// Mantém o tipo e reordena (do maior para o menor valor); a lista original não muda.
-	assert.deepEqual(r.editarValorAlerta(lista, 'a', '5.555'), { lista: [
+	assert.deepEqual(r.editarValorAlerta(lista, 'a', '5,555'), { lista: [
 		{ id: 'b', valor: 20, tipo: 'desativado' },
 		{ id: 'c', valor: 10, tipo: 'maior' },
 		{ id: 'a', valor: 5.56, tipo: 'menor' },
@@ -126,6 +141,47 @@ test('editarValorAlerta recusa valor inválido, igual, duplicado e alerta inexis
 	assert.deepEqual(r.editarValorAlerta(lista, 'b', '10'), { erro: 'duplicado' });
 	// ...mas com o preço acima ele vira "menor" e não colide.
 	assert.ok(r.editarValorAlerta(lista, 'b', '10', 15).lista);
+});
+
+test('criarNovoAlerta escolhe o lado que não dispara; igual ou sem preço → maior', () => {
+	const lista = Object.freeze([Object.freeze({ id: 'a', valor: 30, tipo: 'menor' })]);
+	const criado = (entrada, preco) => {
+		const { lista: nova } = r.criarNovoAlerta(lista, entrada, preco);
+		return nova.find(alerta => alerta.id !== 'a');
+	};
+	assert.equal(criado('100', 150).tipo, 'menor');
+	assert.equal(criado('100', 50).tipo, 'maior');
+	assert.equal(criado('100', 100).tipo, 'maior');
+	for (const semPreco of [NaN, undefined, null, Infinity]) {
+		assert.equal(criado('100', semPreco).tipo, 'maior', String(semPreco));
+	}
+	assert.equal(r.criarNovoAlerta(lista, '100').lista.find(a => a.id !== 'a').tipo, 'maior');
+	// O alerta novo nunca dispara com o mesmo preço (exceto no empate).
+	for (const preco of [50, 150]) {
+		assert.equal(r.deveDisparar(criado('100', preco), preco), false, String(preco));
+	}
+	// Valor arredondado, id novo, lista ordenada (maior valor primeiro) e a original intacta.
+	const { lista: nova } = r.criarNovoAlerta(lista, ' 1,239 ', 500);
+	assert.deepEqual(nova.map(a => [a.valor, a.tipo]), [[30, 'menor'], [1.24, 'menor']]);
+	assert.ok(nova[1].id.length > 0 && nova[1].id !== 'a');
+	assert.equal(lista.length, 1);
+});
+
+test('criarNovoAlerta recusa inválido, duplicado (pelo tipo calculado) e passar do limite', () => {
+	const lista = [{ id: 'a', valor: 400, tipo: 'menor' }, { id: 'b', valor: 300, tipo: 'maior' }];
+	for (const invalido of ['', '  ', 'abc', '0', '-1']) {
+		assert.deepEqual(r.criarNovoAlerta(lista, invalido, 500), { erro: 'invalido' }, invalido);
+	}
+	// Preço acima: o novo seria "menor", igual ao "a" → recusado.
+	assert.deepEqual(r.criarNovoAlerta(lista, '400', 500), { erro: 'duplicado' });
+	// Controle: preço abaixo, o novo seria "maior" e não colide com o "menor" de mesmo valor.
+	assert.ok(r.criarNovoAlerta(lista, '400', 350).lista);
+	// "b" é "maior" com 300: com o preço acima o novo vira "menor" e é aceito; sem preço, colide.
+	assert.ok(r.criarNovoAlerta(lista, '300', 500).lista);
+	assert.deepEqual(r.criarNovoAlerta(lista, '300'), { erro: 'duplicado' });
+
+	const cheia = Array.from({ length: r.MAX_ALERTAS }, (_, i) => ({ id: `x${i}`, valor: 1000 + i, tipo: 'maior' }));
+	assert.deepEqual(r.criarNovoAlerta(cheia, '5', 500), { erro: 'limite' });
 });
 
 test('ciclo de tipos e duplicidade', () => {

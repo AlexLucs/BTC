@@ -16,12 +16,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 RAIZ_PROJETO = Path(__file__).resolve().parent.parent
 
-from apoio_pagina import (  # noqa: E402,F401 - navegador é fixture
+from apoio_pagina import (  # noqa: E402
     INDEX_URL,
     RedeSimulada,
     esperar_carregamento,
     estabilizar_websocket,
-    navegador,
+    fixture_navegador,  # noqa: F401 - registra a fixture "navegador"
     nova_pagina,
 )
 
@@ -46,7 +46,9 @@ window.addEventListener('load', () => setTimeout(() => {
     window.pywebview = { api: {
         carregar_alerta: async () => [],
         salvar_alerta: async () => true,
-        esta_no_topo: async () => false,
+        camada_atual: async () => 'normal',
+        aguardar_estado_janela: () => new Promise(() => {}),  // espera longa que nunca muda
+        aviso_do_atalho: async () => null,
         registrar_metricas: async relatorio => { window.__relatorios.push(relatorio); return true; },
     } };
     window.dispatchEvent(new Event('pywebviewready'));
@@ -679,7 +681,7 @@ def test_pagina_de_producao_funciona_com_o_substituto_vazio(navegador, tmp_path)
         // "then" fica de fora: senão o objeto vira um "thenable" e as Promises nunca resolvem.
         window.pywebview = { api: new Proxy({}, { get: (_, nome) => nome === 'then' ? undefined : async () => {
             window.__chamada(String(nome));
-            return nome === 'carregar_alerta' ? [] : (nome === 'esta_no_topo' ? false : true);
+            return nome === 'carregar_alerta' ? [] : (nome === 'camada_atual' ? 'normal' : true);
         } }) };
     """)
     com_grafico_ao_abrir(contexto)
@@ -707,7 +709,7 @@ def test_navegador_mostra_e_oculta_o_grafico(navegador):
     visiveis = pagina.evaluate("[...document.querySelectorAll('.btns')].filter(b => getComputedStyle(b).display !== 'none').map(b => b.id)")
     assert sorted(visiveis) == ["alerta-btn", "compacto-btn", "grafico-btn", "pausar-btn"]
     caixas = [pagina.locator(f"#{id_}").bounding_box() for id_ in ("alerta-btn", "grafico-btn", "compacto-btn", "pausar-btn")]
-    for esquerda, direita in zip(caixas, caixas[1:]):
+    for esquerda, direita in zip(caixas, caixas[1:], strict=False):  # pares vizinhos
         assert esquerda["x"] + esquerda["width"] <= direita["x"], caixas  # lado a lado, sem sobrepor
 
     pagina.wait_for_function("'nav_load' in Metricas.marcos")
@@ -796,7 +798,9 @@ window.addEventListener('load', () => setTimeout(() => {
     window.pywebview = { api: {
         carregar_alerta: async () => [],
         salvar_alerta: async () => true,
-        esta_no_topo: async () => false,
+        camada_atual: async () => 'normal',
+        aguardar_estado_janela: () => new Promise(() => {}),  // espera longa que nunca muda
+        aviso_do_atalho: async () => null,
         registrar_metricas: async relatorio => { window.__relatorios.push(relatorio); return true; },
     } };
     window.dispatchEvent(new Event('pywebviewready'));
@@ -1142,6 +1146,316 @@ def test_app_abre_no_modo_compacto_salvo_e_tudo_cabe_na_janela(navegador):
     finally:
         contexto.close()
         servidor.fechar()
+
+
+# ---------------------------------------------------------------------------
+# Camada da janela: normal → topo → fundo (botão △/▲/▼; o Python devolve a real)
+# ---------------------------------------------------------------------------
+
+# Registra os pedidos a definir_camada e devolve a camada pedida; o 1º demora mais que os
+# seguintes (sem a fila, as respostas chegariam fora de ordem). __recusarFundo: o fundo
+# falha e a janela fica na normal.
+API_DEFINIR_CAMADA = """
+window.__camadas = [];
+window.addEventListener('pywebviewready', () => {
+    let n = 0;
+    window.pywebview.api.definir_camada = camada => new Promise(resolver => {
+        const atraso = n++ === 0 ? 300 : 10;
+        setTimeout(() => {
+            window.__camadas.push(camada);
+            resolver(window.__recusarFundo && camada === 'fundo' ? 'normal' : camada);
+        }, atraso);
+    });
+});
+"""
+
+# WakeLock falso: conta os pedidos (o app nunca deve pedir; armadilha 71).
+WAKELOCK_FALSO = """
+window.__wake = { pedidos: 0 };
+Object.defineProperty(navigator, 'wakeLock', { configurable: true, value: { request: async () => {
+    window.__wake.pedidos++;
+    const sentinela = new EventTarget();
+    sentinela.release = async () => sentinela.dispatchEvent(new Event('release'));
+    return sentinela;
+} } });
+"""
+
+ESTADO_DA_CAMADA = """() => {
+    const botao = document.getElementById('fixar-btn');
+    return {
+        camada, icone: botao.textContent, dica: botao.title,
+        classe: document.documentElement.classList.contains('fundo'),
+        minimizar: getComputedStyle(document.getElementById('minimize-btn')).display !== 'none',
+        inatividade: monitorarInatividade,
+    };
+}"""
+
+
+def abrir_app_com_camada(navegador, camada_inicial: str = "normal", *scripts: str):
+    contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=False, com_alertas=False,
+                                          user_agent="Mozilla/5.0 pywebview")
+    contexto.add_init_script(PYWEBVIEW_TARDIO.replace(
+        "camada_atual: async () => 'normal'", f"camada_atual: async () => '{camada_inicial}'"))
+    contexto.add_init_script(API_DEFINIR_CAMADA)
+    for script in scripts:
+        contexto.add_init_script(script)
+    pagina.goto(INDEX_URL)
+    esperar_carregamento(pagina)
+    pagina.wait_for_function("typeof window.pywebview?.api?.definir_camada === 'function'")
+    pagina.wait_for_function(f"camada === '{camada_inicial}'")
+    return contexto, pagina, erros
+
+
+def test_camada_troca_na_ordem_dos_cliques(navegador):
+    contexto, pagina, erros = abrir_app_com_camada(navegador)
+    inicial = pagina.evaluate(ESTADO_DA_CAMADA)
+    assert (inicial["icone"], inicial["dica"], inicial["classe"], inicial["minimizar"], inicial["inatividade"]) == (
+        "△", "Fixar no topo", False, True, True)
+
+    for _ in range(3):  # topo, fundo, normal: em fila, apesar de o 1º demorar mais
+        pagina.click("#fixar-btn")
+    pagina.wait_for_function("window.__camadas.length === 3", timeout=5000)
+    assert pagina.evaluate("window.__camadas") == ["topo", "fundo", "normal"]
+    assert pagina.evaluate(ESTADO_DA_CAMADA)["camada"] == "normal"
+
+    pagina.click("#fixar-btn")
+    pagina.wait_for_function("camada === 'topo'")
+    topo = pagina.evaluate(ESTADO_DA_CAMADA)
+    assert (topo["icone"], topo["classe"], topo["minimizar"], topo["inatividade"]) == ("▲", False, True, False)
+
+    pagina.click("#fixar-btn")
+    pagina.wait_for_function("camada === 'fundo'")
+    fundo = pagina.evaluate(ESTADO_DA_CAMADA)
+    # No fundo a janela sai da barra de tarefas: minimizada, não teria como voltar.
+    assert (fundo["icone"], fundo["classe"], fundo["minimizar"], fundo["inatividade"]) == ("▼", True, False, False)
+    assert fundo["dica"] == "No fundo: voltar ao normal"
+    assert not erros, erros
+    contexto.close()
+
+
+def test_fundo_recusado_volta_ao_normal_e_o_ciclo_segue_da_real(navegador):
+    contexto, pagina, erros = abrir_app_com_camada(navegador)
+    pagina.evaluate("window.__recusarFundo = true")
+    pagina.click("#fixar-btn")
+    pagina.click("#fixar-btn")
+    pagina.wait_for_function("window.__camadas.length === 2", timeout=5000)
+    estado = pagina.evaluate(ESTADO_DA_CAMADA)
+    assert (estado["camada"], estado["icone"], estado["classe"]) == ("normal", "△", False)
+    pagina.click("#fixar-btn")  # da camada real (normal), não da pedida (fundo)
+    pagina.wait_for_function("window.__camadas.length === 3", timeout=5000)
+    assert pagina.evaluate("window.__camadas")[-1] == "topo"
+    assert not erros, erros
+    contexto.close()
+
+
+def test_app_abre_na_camada_fundo_informada_pelo_python(navegador):
+    contexto, pagina, erros = abrir_app_com_camada(navegador, "fundo")
+    estado = pagina.evaluate(ESTADO_DA_CAMADA)
+    assert (estado["icone"], estado["classe"], estado["minimizar"], estado["inatividade"]) == ("▼", True, False, False)
+    assert pagina.evaluate("window.__camadas") == []  # só informou; nenhum pedido
+    assert not erros, erros
+    contexto.close()
+
+
+def test_wakelock_nunca_e_pedido_em_nenhuma_camada(navegador):
+    """Um WakeLock de tela impede o Windows de desligar os monitores, até com o computador bloqueado."""
+    contexto, pagina, erros = abrir_app_com_camada(navegador, "normal", WAKELOCK_FALSO)
+    pagina.wait_for_function("ativo && Number.isFinite(ultimoPrecoBRL)")
+    for camada in ("topo", "fundo", "normal"):
+        pagina.click("#fixar-btn")
+        pagina.wait_for_function(f"camada === '{camada}'")
+    pagina.evaluate("document.dispatchEvent(new Event('visibilitychange'))")  # volta a ficar visível
+    pagina.wait_for_timeout(200)
+    assert pagina.evaluate("window.__wake.pedidos") == 0
+    assert not erros, erros
+    contexto.close()
+
+
+# ---------------------------------------------------------------------------
+# Janela coberta (camada fundo): conta como oculta para a rede
+# ---------------------------------------------------------------------------
+
+# API do app já pronta na abertura (sem o atraso do PYWEBVIEW_TARDIO, que com os timers
+# acelerados venceria o prazo da ponte) e espera longa controlada pelo teste:
+# window.__publicar({coberto, ausente}) muda o estado e acorda a página. Os pedidos de
+# destaque do alarme ficam em window.__destaques.
+API_APP_COM_ESTADO_DA_JANELA = """
+window.__estado = { versao: 0, coberto: false, ausente: false };
+window.__esperas = [];
+window.__destaques = [];
+window.__publicar = parcial => {
+    window.__estado = { ...window.__estado, ...parcial, versao: window.__estado.versao + 1 };
+    for (const acordar of window.__esperas.splice(0)) acordar({ ...window.__estado });
+};
+window.pywebview = { api: {
+    carregar_alerta: async () => __ALERTAS__,
+    salvar_alerta: async () => true,
+    camada_atual: async () => '__CAMADA__',
+    destacar_alarme: async ativo => { window.__destaques.push(ativo); return true; },
+    aguardar_estado_janela: __ESTADO__,
+    aviso_do_atalho: async () => { window.__avisosAtalho = (window.__avisosAtalho || 0) + 1; return __AVISO_ATALHO__; },
+} };
+"""
+ESPERA_LONGA = """versao => new Promise(resolver => {
+        if (versao !== window.__estado.versao) resolver({ ...window.__estado });
+        else window.__esperas.push(resolver);
+    })"""
+
+
+def api_do_app_no_fundo(alertas: list | None = None, espera: str = ESPERA_LONGA, camada: str = "fundo",
+                        aviso_atalho: dict | str | None = None) -> str:
+    return (API_APP_COM_ESTADO_DA_JANELA
+            .replace("__ALERTAS__", json.dumps(alertas or []))
+            .replace("__ESTADO__", espera)
+            .replace("__CAMADA__", camada)
+            .replace("__AVISO_ATALHO__", json.dumps(aviso_atalho)))
+
+
+def abrir_app_com_estado_da_janela(navegador, rede: RedeSimulada, alertas: list | None = None,
+                                   espera: str = ESPERA_LONGA):
+    contexto, pagina, erros = nova_pagina(navegador, rede, acelerar=True, com_alertas=False,
+                                          user_agent="Mozilla/5.0 pywebview")
+    contexto.add_init_script(api_do_app_no_fundo(alertas, espera))
+    pagina.goto(INDEX_URL)
+    esperar_carregamento(pagina)
+    pagina.wait_for_function(f"alertas.length === {len(alertas or [])} && camada === 'fundo'")
+    return contexto, pagina, erros
+
+
+def test_janela_coberta_desliga_a_rede_e_descoberta_religa(navegador):
+    rede = RedeSimulada()
+    contexto, pagina, erros = abrir_app_com_estado_da_janela(navegador, rede)
+    pagina.wait_for_function("window.__esperas.length === 1")  # a página já espera a próxima mudança
+    pagina.wait_for_function("precosLigados && fontes.taxas.ligada && fontes.dolar.ligada")
+    pagina.evaluate("window.__publicar({ coberto: true })")
+    pagina.wait_for_function("!precosLigados && !fontes.taxas.ligada && !fontes.dolar.ligada")
+    assert pagina.evaluate("ws === null")
+    antes = dict(rede.contagem)
+    pagina.wait_for_timeout(800)  # ~40 s acelerados: nenhum pedido
+    assert dict(rede.contagem) == antes, (antes, rede.contagem)
+    pagina.wait_for_function("window.__esperas.length === 1")  # e já espera a próxima
+
+    pagina.evaluate("window.__publicar({ coberto: false })")
+    pagina.wait_for_function("precosLigados && fontes.taxas.ligada && fontes.dolar.ligada")
+    esperar(lambda: rede.contagem["binance"] > antes.get("binance", 0), pagina)
+    assert not erros, erros
+    contexto.close()
+
+
+def test_janela_coberta_com_alerta_ativo_mantem_so_o_btc_brl(navegador):
+    rede = RedeSimulada()
+    contexto, pagina, erros = abrir_app_com_estado_da_janela(navegador, rede, alertas=ALERTA_ATIVO_DISTANTE)
+    pagina.wait_for_function("window.__esperas.length === 1")
+    pagina.evaluate("window.__publicar({ coberto: true })")
+    pagina.wait_for_function("!fontes.taxas.ligada && !fontes.dolar.ligada")
+    assert pagina.evaluate("precosLigados") is True
+    assert pagina.evaluate("necessidades().usdt") is False
+    assert pagina.evaluate("necessidades().grafico") is False
+    assert not erros, erros
+    contexto.close()
+
+
+def test_estado_da_janela_invalido_tenta_de_novo_sem_quebrar(navegador):
+    """Resposta inválida (ou falha na ponte): a página espera e pede de novo, sem erro."""
+    espera = "async () => { window.__invalidas = (window.__invalidas ?? 0) + 1; return true; }"
+    contexto, pagina, erros = abrir_app_com_estado_da_janela(navegador, RedeSimulada(), espera=espera)
+    pagina.wait_for_function("(window.__invalidas ?? 0) >= 2", timeout=5000)  # 10 s acelerados entre pedidos
+    assert pagina.evaluate("janelaCoberta") is False
+    assert not erros, erros
+    contexto.close()
+
+
+# ---------------------------------------------------------------------------
+# Camada fundo: pausa pela ausência do usuário e destaque do alarme
+# ---------------------------------------------------------------------------
+
+def test_usuario_ausente_pausa_e_a_volta_retoma(navegador):
+    contexto, pagina, erros = abrir_app_com_estado_da_janela(navegador, RedeSimulada())
+    pagina.wait_for_function("window.__esperas.length === 1")
+    pagina.evaluate("window.__publicar({ ausente: true })")
+    pagina.wait_for_function("!ativo")
+    assert pagina.evaluate("pausaManual") is False
+    assert pagina.evaluate("getComputedStyle(document.getElementById('overlay')).display") == "flex"
+    pagina.evaluate("window.__publicar({ ausente: false })")  # tecla ou mouse em qualquer janela
+    pagina.wait_for_function("ativo")
+    assert not erros, erros
+    contexto.close()
+
+
+def test_usuario_ausente_com_alerta_ativo_nao_pausa(navegador):
+    contexto, pagina, erros = abrir_app_com_estado_da_janela(navegador, RedeSimulada(), alertas=ALERTA_ATIVO_DISTANTE)
+    pagina.wait_for_function("window.__esperas.length === 1")
+    pagina.evaluate("window.__publicar({ ausente: true })")
+    pagina.wait_for_function("usuarioAusente")
+    pagina.wait_for_timeout(1500)  # passa pelo verificador de inatividade (a cada 1 s)
+    assert pagina.evaluate("ativo") is True
+    assert not erros, erros
+    contexto.close()
+
+
+def test_pausa_manual_nao_e_desfeita_pela_volta_do_usuario(navegador):
+    contexto, pagina, erros = abrir_app_com_estado_da_janela(navegador, RedeSimulada())
+    pagina.wait_for_function("window.__esperas.length === 1")
+    pagina.click("#pausar-btn")
+    pagina.evaluate("window.__publicar({ ausente: true })")
+    pagina.wait_for_function("usuarioAusente")
+    pagina.evaluate("window.__publicar({ ausente: false })")
+    pagina.wait_for_function("!usuarioAusente")
+    assert pagina.evaluate("ativo") is False and pagina.evaluate("pausaManual") is True
+    assert not erros, erros
+    contexto.close()
+
+
+def abrir_alarme_na_camada(navegador, camada: str = "fundo"):
+    """Como abrir_com_alarme, mas no app (API pronta), na camada pedida."""
+    contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=False, com_alertas=False,
+                                          user_agent="Mozilla/5.0 pywebview")
+    contexto.add_init_script(AUDIO_FALSO)
+    contexto.add_init_script(api_do_app_no_fundo(ALERTA_QUE_DISPARARIA, camada=camada))
+    pagina.clock.install()
+    pagina.goto(INDEX_URL)
+    esperar_carregamento(pagina)
+    for _ in range(20):  # silêncio inicial (5 s) + checagem (1 s)
+        if dialogo_aberto(pagina):
+            break
+        pagina.clock.run_for(1000)
+    assert dialogo_aberto(pagina), "o alarme não disparou"
+    return contexto, pagina, erros
+
+
+def test_alarme_no_fundo_destaca_a_janela_ate_o_ok(navegador):
+    contexto, pagina, erros = abrir_alarme_na_camada(navegador)
+    esperar_pagina(pagina, "window.__destaques.length === 1")
+    assert pagina.evaluate("window.__destaques") == [True]
+    pagina.click("#dialogo-ok")
+    esperar_pagina(pagina, "window.__destaques.length === 2")
+    assert pagina.evaluate("window.__destaques") == [True, False]
+    assert not erros, erros
+    contexto.close()
+
+
+def test_alarme_no_fundo_sai_do_destaque_ao_sair_da_tela_e_volta_com_ele(navegador):
+    """Opção B: o alarme oculto só volta com movimento sobre a janela (como fora do fundo)."""
+    contexto, pagina, erros = abrir_alarme_na_camada(navegador)
+    restante = terminar_toques(pagina)
+    pagina.clock.run_for(int(restante))
+    esperar_pagina(pagina, "alarmesPendentes.get('a')?.situacao === 'oculto'")
+    esperar_pagina(pagina, "window.__destaques.length === 2")
+    assert pagina.evaluate("window.__destaques") == [True, False]
+    mover(pagina, 20)
+    esperar_pagina(pagina, "window.__destaques.length === 3")
+    assert pagina.evaluate("window.__destaques") == [True, False, True]
+    assert not erros, erros
+    contexto.close()
+
+
+def test_alarme_fora_do_fundo_nao_pede_destaque(navegador):
+    contexto, pagina, erros = abrir_alarme_na_camada(navegador, camada="normal")
+    pagina.click("#dialogo-ok")
+    esperar_pagina(pagina, "alarmesPendentes.size === 0")
+    assert pagina.evaluate("window.__destaques") == []
+    assert not erros, erros
+    contexto.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1713,3 +2027,216 @@ def test_valor_do_alerta_e_o_campo_de_edicao_nao_arrastam_a_janela(navegador):
     assert arrastes(pagina) == 1
     assert not erros, erros
     contexto.close()
+
+
+# ---------------------------------------------------------------------------
+# Atalho global: aviso de combinação em uso por outro programa
+# ---------------------------------------------------------------------------
+
+
+# Guarda cada diálogo aberto: com os timers acelerados, o aviso (15 s) fecha em ~0,3 s.
+GUARDAR_DIALOGOS = """
+window.__dialogos = [];
+const abrirOriginal = HTMLDialogElement.prototype.showModal;
+HTMLDialogElement.prototype.showModal = function () {
+    window.__dialogos.push({
+        titulo: document.getElementById('dialogo-titulo').textContent,
+        conteudo: document.getElementById('dialogo-conteudo').textContent,
+    });
+    return abrirOriginal.call(this);
+};
+"""
+
+
+def abrir_app_com_aviso_de_atalho(navegador, aviso):
+    rede = RedeSimulada()
+    contexto, pagina, erros = nova_pagina(navegador, rede, acelerar=True, com_alertas=False,
+                                          user_agent="Mozilla/5.0 pywebview")
+    contexto.add_init_script(api_do_app_no_fundo(camada="normal", aviso_atalho=aviso))
+    contexto.add_init_script(GUARDAR_DIALOGOS)
+    pagina.goto(INDEX_URL)
+    esperar_carregamento(pagina)
+    pagina.wait_for_function("window.__avisosAtalho === 1")
+    return contexto, pagina, erros
+
+
+@pytest.mark.parametrize(("aviso", "mensagem"), [
+    ({"ativo": "Ctrl+Shift+Alt+B", "em_uso": ["Ctrl+Alt+B"]},
+     "Ctrl+Alt+B já está em uso por outro programa. Para trazer ou esconder o BTC Status, use Ctrl+Shift+Alt+B."),
+    ({"ativo": None, "em_uso": ["Ctrl+Alt+B", "Ctrl+Shift+Alt+B"]},
+     "Ctrl+Alt+B e Ctrl+Shift+Alt+B já estão em uso por outros programas. "
+     "O BTC Status ficou sem atalho global nesta execução."),
+])
+def test_atalho_em_uso_e_avisado_ao_abrir(navegador, aviso, mensagem):
+    contexto, pagina, erros = abrir_app_com_aviso_de_atalho(navegador, aviso)
+    pagina.wait_for_function("window.__dialogos.length > 0", timeout=3000)
+    assert pagina.evaluate("window.__dialogos") == [{"titulo": "ATALHO", "conteudo": mensagem}]
+    assert not erros, erros
+    contexto.close()
+
+
+@pytest.mark.parametrize("aviso", [None, {"ativo": "Ctrl+Alt+B", "em_uso": []}, "normal"])
+def test_sem_conflito_de_atalho_nao_avisa(navegador, aviso):
+    contexto, pagina, erros = abrir_app_com_aviso_de_atalho(navegador, aviso)
+    pagina.wait_for_timeout(300)
+    assert pagina.evaluate("window.__dialogos") == []
+    assert not erros, erros
+    contexto.close()
+
+
+# --- Alertas salvos nunca são sobrescritos antes de serem lidos (C1) -----------------------
+# A tela pode aparecer antes de carregar_alerta responder (estado salvo) e a 1ª leitura pode
+# falhar (ponte lenta na abertura fria). Gravar nesse meio-tempo, com a lista em memória
+# vazia, apagaria os alertas do disco.
+ALERTAS_NO_DISCO = [{"id": "d1", "valor": 900_000, "tipo": "maior"}, {"id": "d2", "valor": 100_000, "tipo": "menor"}]
+API_LEITURA_CONTROLADA = """
+window.__gravados = [];
+window.__leituras = 0;
+window.pywebview = { api: {
+    carregar_alerta: () => {
+        window.__leituras++;
+        __LEITURA__
+    },
+    salvar_alerta: async lista => { window.__gravados.push(lista); return true; },
+    camada_atual: async () => 'normal',
+    aguardar_estado_janela: () => new Promise(() => {}),
+    aviso_do_atalho: async () => null,
+} };
+"""
+# 1ª leitura falha (a ponte rejeita), a 2ª devolve o disco.
+LEITURA_QUE_FALHA_UMA_VEZ = (
+    "if (window.__leituras === 1) return Promise.reject(new Error('ponte lenta'));"
+    f" return Promise.resolve({json.dumps(ALERTAS_NO_DISCO)});")
+# A leitura só responde quando o teste chama window.__liberarLeitura().
+LEITURA_SEGURADA = (
+    f"return new Promise(r => {{ window.__liberarLeitura = () => r({json.dumps(ALERTAS_NO_DISCO)}); }});")
+
+
+def abrir_app_com_leitura(navegador, leitura: str):
+    contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=True, com_alertas=False,
+                                          user_agent="Mozilla/5.0 pywebview")
+    contexto.add_init_script(API_LEITURA_CONTROLADA.replace("__LEITURA__", leitura))
+    contexto.add_init_script(GUARDAR_DIALOGOS)
+    pagina.goto(INDEX_URL)
+    esperar_carregamento(pagina)
+    return contexto, pagina, erros
+
+
+def test_leitura_dos_alertas_que_falha_e_repetida_sem_gravar_nada(navegador):
+    contexto, pagina, erros = abrir_app_com_leitura(navegador, LEITURA_QUE_FALHA_UMA_VEZ)
+    pagina.wait_for_function(f"alertas.length === {len(ALERTAS_NO_DISCO)}")
+    assert pagina.evaluate("window.__leituras") == 2
+    assert pagina.evaluate("window.__gravados") == []  # nada foi gravado com a lista vazia
+    assert pagina.evaluate("window.__dialogos") == []  # a nova tentativa deu certo: sem aviso
+    assert not erros, erros
+    contexto.close()
+
+
+def test_mudanca_antes_da_leitura_dos_alertas_e_recusada_e_depois_aceita(navegador):
+    contexto, pagina, erros = abrir_app_com_leitura(navegador, LEITURA_SEGURADA)
+    pagina.wait_for_function("typeof window.__liberarLeitura === 'function'")
+    pagina.evaluate("ui.campoValor.value = '123456'; criarAlerta()")
+    assert pagina.evaluate("window.__gravados") == []
+    assert pagina.evaluate("alertas.length") == 0
+    assert pagina.evaluate("window.__dialogos.map(d => d.titulo)") == ["AGUARDE"]
+
+    pagina.evaluate("window.__liberarLeitura()")
+    pagina.wait_for_function(f"alertas.length === {len(ALERTAS_NO_DISCO)}")
+    pagina.evaluate("ui.campoValor.value = '123456'; criarAlerta()")
+    pagina.wait_for_function("window.__gravados.length === 1")
+    gravado = pagina.evaluate("window.__gravados[0]")
+    assert sorted(alerta["valor"] for alerta in gravado) == [100_000, 123_456, 900_000]
+    assert not erros, erros
+    contexto.close()
+
+
+# --- Valor do alerta no formato brasileiro (C2) ---------------------------------------------
+@pytest.mark.parametrize("digitado, valor", [
+    ("500.000", 500_000),        # ponto de milhar: 500 mil, não R$ 500,00
+    ("500.000,50", 500_000.5),
+    ("450000,5", 450_000.5),
+    ("R$ 1.500.000,00", 1_500_000),
+])
+def test_criar_alerta_entende_o_formato_brasileiro(navegador, digitado, valor):
+    contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=False, com_alertas=False)
+    pagina.goto(INDEX_URL)
+    esperar_carregamento(pagina)
+    pagina.wait_for_function("Number.isFinite(ultimoPrecoBRL)")
+    pagina.evaluate("alternarTelaAlerta()")
+    criar_pelo_formulario(pagina, digitado)
+    assert [alerta["valor"] for alerta in salvos(pagina)] == [valor]
+    assert not erros, erros
+    contexto.close()
+
+
+def test_edicao_mostra_o_valor_no_formato_brasileiro_e_o_le_de_volta(navegador):
+    contexto, pagina, erros = abrir_alertas_para_editar(navegador)
+    pagina.click('#alertasTabela tr[data-id="c"] .botaoValor')
+    campo = pagina.locator('#alertasTabela tr[data-id="c"] .campoEdicaoValor')
+    original = pagina.evaluate("alertas.find(a => a.id === 'c').valor")
+    assert campo.input_value() == pagina.evaluate(
+        f"new Intl.NumberFormat('pt-BR', {{ maximumFractionDigits: 2 }}).format({original})")
+    campo.fill("1.234.567,89")
+    campo.press("Enter")
+    assert {"id": "c", "valor": 1_234_567.89} == {k: v for k, v in salvos(pagina)[0].items() if k != "tipo"}
+    assert not erros, erros
+    contexto.close()
+
+
+# --- Preço zero da Binance não dispara alarmes (I2) -----------------------------------------
+def test_preco_zero_da_binance_conta_como_falha_e_nao_dispara_alertas_menor(navegador):
+    rede = RedeSimulada()
+    rede.preco = 0.0  # "0.00" nos dois pares, como um par suspenso
+    contexto, pagina, erros = nova_pagina(navegador, rede, acelerar=True,
+                                          com_alertas=[{"id": "a", "valor": 100_000, "tipo": "menor"}])
+    pagina.goto(INDEX_URL)
+    esperar_carregamento(pagina)
+    pagina.wait_for_function("falhasBRL >= 3")  # passou do silêncio da abertura (timers 50x)
+    pagina.wait_for_timeout(500)
+    assert pagina.evaluate("alarmesPendentes.size") == 0
+    assert pagina.evaluate("Number.isNaN(ultimoPrecoBRL)") is True
+    assert "Sem Dados" in pagina.text_content("#info-price")
+    contexto.close()
+
+
+# --- Gráfico só como iframe: nenhum script do TradingView na página (I4) ---------------------
+def test_grafico_e_um_iframe_do_tradingview_sem_script_dele_na_pagina(navegador):
+    contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=False, com_alertas=False,
+                                          user_agent="Mozilla/5.0 pywebview")
+    contexto.add_init_script(PYWEBVIEW_TARDIO)
+    scripts: list[str] = []
+    pagina.on("request", lambda pedido: pedido.resource_type == "script" and scripts.append(pedido.url))
+    pagina.goto(INDEX_URL)
+    esperar_carregamento(pagina)
+    pagina.wait_for_function("'api_python_pronta' in Metricas.marcos")
+    pagina.click("#grafico-btn")
+    pagina.wait_for_function("document.querySelector('#grafico iframe')?.src.startsWith('https://')", timeout=10000)
+    src = pagina.evaluate("document.querySelector('#grafico iframe').src")
+    endereco, opcoes = src.split("#", 1)
+    assert endereco == "https://s.tradingview.com/embed-widget/symbol-overview/?locale=br"
+    from urllib.parse import unquote  # noqa: PLC0415
+
+    assert json.loads(unquote(opcoes))["symbols"] == [["BINANCE:BTCBRL|5D"]]
+    assert "allow-scripts" in pagina.get_attribute("#grafico iframe", "sandbox")
+    assert not any("tradingview" in url for url in scripts), scripts
+    csp = pagina.get_attribute('meta[http-equiv="Content-Security-Policy"]', "content")
+    script_src = next(parte for parte in csp.split(";") if parte.strip().startswith("script-src"))
+    assert "tradingview" not in script_src
+    assert not erros, erros
+    contexto.close()
+
+
+# --- Cobertura do JS da página (preparar_revisao.ps1 -ComCobertura) -------------------------
+def test_cobertura_do_js_da_pagina_e_gravada_ao_fechar_o_contexto(navegador, monkeypatch, tmp_path):
+    import apoio_pagina  # noqa: PLC0415
+
+    monkeypatch.setattr(apoio_pagina, "PASTA_COBERTURA_JS", str(tmp_path))
+    contexto, pagina, erros = nova_pagina(navegador, RedeSimulada(), acelerar=False, com_alertas=False)
+    pagina.goto(INDEX_URL)
+    esperar_carregamento(pagina)
+    contexto.close()
+    arquivos = list(tmp_path.glob("coverage-*.json"))
+    assert len(arquivos) == 1
+    medidos = {Path(script["url"]).name for script in json.loads(arquivos[0].read_text(encoding="utf-8"))["result"]}
+    assert medidos == {"script.js", "regras.js", "metricas.js"}
+    assert not erros, erros

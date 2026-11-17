@@ -26,21 +26,6 @@ CORS = {"Access-Control-Allow-Origin": "*"}  # a página é aberta por file:// (
 # Preço ÷ abertura nos dados simulados: a página calcula 1,23% de variação.
 VARIACAO_SIMULADA = 1.0123
 
-WIDGET_SIMULADO = """
-(function () {
-    const script = document.currentScript;
-    const alvo = script.parentElement.querySelector('.tradingview-widget-container__widget');
-    const opcoes = JSON.parse(script.textContent);
-    const iframe = document.createElement('iframe');
-    iframe.src = 'https://s.tradingview.com/simulado.html';
-    iframe.style.border = '0';
-    iframe.style.display = 'block';
-    // Como o widget real: com "autosize" ocupa 100% do pai; senão, o tamanho fixo.
-    iframe.style.width = opcoes.autosize ? '100%' : `${opcoes.width}px`;
-    iframe.style.height = opcoes.autosize ? '100%' : `${opcoes.height}px`;
-    alvo.append(iframe);
-})();
-"""
 
 ACELERAR_TIMERS = f"""
 (() => {{
@@ -103,7 +88,7 @@ class RedeSimulada:
         contexto.route_web_socket(re.compile(r"^wss://stream\.binance\.com(:\d+)?/"), self._websocket)
         contexto.route("https://economia.awesomeapi.com.br/**", self._json("dolar"))
         contexto.route("https://mempool.space/**", self._json("taxas"))
-        contexto.route("https://s3.tradingview.com/**", lambda rota: rota.fulfill(body=WIDGET_SIMULADO, content_type="application/javascript", headers=CORS))
+        # O gráfico é só um iframe do TradingView (script.js: URL_GRAFICO).
         contexto.route("https://s.tradingview.com/**", lambda rota: rota.fulfill(body="<html><body style='background:#000'></body></html>", content_type="text/html"))
 
     def _websocket(self, ws) -> None:
@@ -163,8 +148,10 @@ class RedeSimulada:
         return responder
 
 
-@pytest.fixture(scope="module")
-def navegador():
+# A fixture se chama "navegador" nos testes; a função tem outro nome para que importá-la
+# (o que a registra no módulo de teste) não seja "redefinida" pelo parâmetro (ruff F811).
+@pytest.fixture(scope="module", name="navegador")
+def fixture_navegador():
     escolha = os.getenv("BTC_NAVEGADOR")
     canais = [escolha] if escolha else ["msedge", "chrome", "chromium"]
     with sync_api.sync_playwright() as playwright:
@@ -183,6 +170,48 @@ def navegador():
                     "(python -m playwright install chromium)")
 
 
+# Cobertura do JS da página (preparar_revisao.ps1 -ComCobertura): com BTC_COBERTURA_JS=<pasta>,
+# cada página criada por nova_pagina mede a cobertura pelo Profiler do Chromium (CDP) e a
+# grava ao fechar o contexto, no formato do NODE_V8_COVERAGE (o c8 a lê e junta). Sem a
+# variável, nada muda.
+PASTA_COBERTURA_JS = os.getenv("BTC_COBERTURA_JS")
+ARQUIVOS_COM_COBERTURA = ("script.js", "regras.js", "metricas.js")
+
+
+def _endereco_no_disco(url: str) -> str | None:
+    """file:// ou http://127.0.0.1:<porta>/ (servidor local) de um arquivo da página na raiz."""
+    nome = url.split("?", 1)[0].rsplit("/", 1)[-1]
+    if nome not in ARQUIVOS_COM_COBERTURA:
+        return None
+    if url.startswith("file:") or url.startswith("http://127.0.0.1:"):
+        return (RAIZ / nome).as_uri()
+    return None
+
+
+def _ligar_cobertura_js(contexto, pagina) -> None:
+    sessao = contexto.new_cdp_session(pagina)
+    sessao.send("Profiler.enable")
+    sessao.send("Profiler.startPreciseCoverage", {"callCount": True, "detailed": True})
+    fechar_original = contexto.close
+
+    def fechar(*args, **kwargs):
+        try:
+            scripts = sessao.send("Profiler.takePreciseCoverage")["result"]
+            medidos = []
+            for script in scripts:
+                endereco = _endereco_no_disco(script.get("url", ""))
+                if endereco:
+                    medidos.append({**script, "url": endereco})
+            if medidos:
+                arquivo = Path(PASTA_COBERTURA_JS) / f"coverage-{os.getpid()}-{time.monotonic_ns()}.json"
+                arquivo.write_text(json.dumps({"result": medidos}), encoding="utf-8")
+        except Exception:  # noqa: BLE001 - página já fechada: só este teste fica sem cobertura
+            pass
+        return fechar_original(*args, **kwargs)
+
+    contexto.close = fechar
+
+
 def nova_pagina(navegador, rede: RedeSimulada, acelerar: bool, com_alertas: bool | list, **opcoes_contexto):
     contexto = navegador.new_context(viewport={"width": 500, "height": 810}, **opcoes_contexto)
     rede.instalar(contexto)
@@ -193,6 +222,8 @@ def nova_pagina(navegador, rede: RedeSimulada, acelerar: bool, com_alertas: bool
         alertas = alertas_que_nunca_disparam() if com_alertas is True else com_alertas
         contexto.add_init_script(f"localStorage.setItem('alertasjson', {json.dumps(json.dumps(alertas))});")
     pagina = contexto.new_page()
+    if PASTA_COBERTURA_JS:
+        _ligar_cobertura_js(contexto, pagina)
     erros: list[str] = []
     pagina.on("pageerror", lambda erro: erros.append(str(erro)))
     return contexto, pagina, erros

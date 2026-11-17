@@ -23,7 +23,7 @@ from apoio_pagina import (
     RedeSimulada,
     esperar_carregamento,
     estabilizar_websocket,
-    navegador,  # noqa: F401 - fixture
+    fixture_navegador,  # noqa: F401 - registra a fixture "navegador"
     nova_pagina,
 )
 from test_pagina_funcional import (
